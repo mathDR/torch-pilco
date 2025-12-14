@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "torch-pilco"
+
+version = "0.0.1"
+
+description = "Monte Carlo PILCO in Torch"
+
+dependencies = [
+  "torch",
+  "torchrl",
+  "torchopt",
+  "gpytorch",
+  "tensordict-nightly",
+  "pytorch-ignite",
+  "numpy",
+  "gymnasium",
+  "pygame",
+]
+requires-python = ">= 3.12"
+
+keywords = ["PILCO", "reinforcement learning"]
+
+authors = [
+  {name = "Daniel Marthaler", email = "dan.marthaler@gmail.com"},
+]
+maintainers = [
+  {name = "Daniel Marthaler", email = "dan.marthaler@gmail.com"},
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+dev = [
+  "jupyter",
+  "notebook",
+  "matplotlib",
+  "black",
+  "flake8",
+  "isort",
+]

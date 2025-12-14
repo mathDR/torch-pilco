@@ -1,0 +1,29 @@
+services:
+  torch-mc-pilco:
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: torch-mc-pilco
+
+    runtime: nvidia
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # or specify a number like 1, 2, etc.
+              capabilities: [gpu]
+
+    environment:
+      - DISPLAY=$DISPLAY
+    volumes:
+      - ./:/workspace/
+      - /share:/share/airlab/users/dmarthaler
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    ports:
+      - "8888:8888"
+      - "3000:3000"
+    command: bash -c "tail -F  /dev/null"
