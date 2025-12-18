@@ -44,14 +44,14 @@ class GPyTorchEnv(EnvBase):
         
         # specs
         self.action_spec = BoundedContinuous(
-            low=torch.tile(torch.from_numpy(env.action_space.low),(self.batch_size[0],1,self.action_size)),
-            high=torch.tile(torch.from_numpy(env.action_space.high),(self.batch_size[0],1,self.action_size)),
+            low=torch.tile(torch.from_numpy(env.action_space.low),(self.batch_size[0],self.action_size)),
+            high=torch.tile(torch.from_numpy(env.action_space.high),(self.batch_size[0],self.action_size)),
             device=self.device,
             dtype=torch.float32,
         )
 
         observation_spec = UnboundedContinuous(
-            shape=torch.Size([self.batch_size[0], 1, self.state_size])
+            shape=torch.Size([self.batch_size[0], self.state_size])
         ) # unlimited observation space
         # Observation spec should be same and batch_size per https://github.com/pytorch/rl/issues/1766
         self.observation_spec = Composite(
@@ -68,7 +68,7 @@ class GPyTorchEnv(EnvBase):
     def gen_states(self, batch_size: int) -> None:
         # init new state from the replay buffer
         replay_buffer_sample = self.replay_buffer.sample(batch_size)
-        self.state = replay_buffer_sample["observation"].float().reshape(self.batch_size[0],1,self.state_size)
+        self.state = replay_buffer_sample["observation"].float().reshape(self.batch_size[0],self.state_size)
     
     def _reset(self, tensordict: TensorDict | None = None):
         if tensordict is None or tensordict.is_empty():
@@ -77,7 +77,7 @@ class GPyTorchEnv(EnvBase):
             # parameters to get started.
             self.gen_states(batch_size=self.batch_size[0])
         else:
-            self.state = tensordict["observation"].float().reshape(self.batch_size[0],1,self.state_size)
+            self.state = tensordict["observation"].float().reshape(self.batch_size[0],self.state_size)
         
         out_tensordict = TensorDict({}, batch_size=self.batch_size)
         out_tensordict.set("observation", self.state)
@@ -89,12 +89,15 @@ class GPyTorchEnv(EnvBase):
         tensordict: TensorDict
     ) -> TensorDict:
         action = tensordict["action"]
-        action = action.reshape((self.batch_size[0], 1, self.action_size))
+        action = action.reshape((self.batch_size[0], self.action_size))
 
         with torch.no_grad(), gpytorch.settings.fast_pred_var():
             # The model should be called with current state + action to predict next state
-            model_input = torch.vmap(self.gp_model.data_to_gp_input, in_dims=(0,0))(self.state, action)
-            self.state = torch.cat([self.gp_model(mi).sample() for mi in model_input]).unsqueeze(1)
+            model_input = torch.vmap(
+                self.gp_model.data_to_gp_input,
+                in_dims=(0,0)
+            )(self.state.unsqueeze(1), action.unsqueeze(1))
+            self.state = torch.cat([self.gp_model(mi).sample() for mi in model_input])
 
         reward = torch.vmap(self.reward_func, in_dims=(0,0))(self.state, action).float()
 
