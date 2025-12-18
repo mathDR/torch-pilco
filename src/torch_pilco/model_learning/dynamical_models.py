@@ -6,98 +6,6 @@ import gpytorch
 import numpy as np
 
 
-def data_to_gp_output(
-    states: torch.Tensor,
-    actions: torch.Tensor,
-    control_memory: int,
-    position_memory: int,
-) -> torch.Tensor:
-    """Transforms data into PILCO data format.
-        Assumes states are passed in oldest to newest, so we
-        first flip them and then take their first difference
-    """
-    cutoff = max(control_memory, position_memory) - 1
-    return torch.flip(
-        torch.diff(states, n=1, dim=0),
-        dims=[0]
-    ).float()[:-cutoff, :]
-
-
-def data_to_gp_input(
-    states: torch.Tensor,
-    actions: torch.Tensor,
-    control_memory: int,
-    position_memory: int,
-) -> torch.Tensor:
-    """Transforms all training data into PILCO data format.
-        Assumes states are passed in oldest to newest, so we
-        first flip them and then take their first difference
-    """
-    reordered_states = torch.flip(states, dims=[0])
-    states_diff = torch.diff(reordered_states, n=1, dim=0)
-    reordered_actions = torch.flip(actions, dims=[0])
-
-    delta_states = states_diff.unfold(
-        dimension=0,
-        size=position_memory,
-        step=1,
-    ).flatten(start_dim=1, end_dim=2)
-    cat_actions = reordered_actions.unfold(
-        dimension=0,
-        size=control_memory + 1,
-        step=1,
-    ).flatten(start_dim=1, end_dim=2)
-    # We can use python booleans here since position_memory and control_memory
-    # are defined at initialization time
-    if position_memory > control_memory:
-        cutoff = position_memory-control_memory
-        return torch.cat(
-            (
-                reordered_states[0:-position_memory, :],
-                delta_states[:, :],
-                cat_actions[0:-cutoff, :]
-            ),
-            dim=1
-        ).float()
-    elif control_memory < position_memory:
-        cutoff = control_memory-position_memory
-        return torch.cat(
-            (
-                reordered_states[0:-control_memory, :],
-                delta_states[0:-cutoff, :],
-                cat_actions[:, :]
-            ),
-            dim=1
-        ).float()
-    else:
-        return torch.cat(
-            (
-                reordered_states[0:-control_memory, :],
-                delta_states[:, :],
-                cat_actions[:, :]
-            ),
-            dim=1
-        ).float()
-
-
-def data_to_policy_input(
-    states: torch.Tensor,
-    position_memory: int,
-) -> torch.Tensor:
-    """Transforms data into policy data format.
-        Assumes states are passed in oldest to newest, so we
-        first flip them and then take their first difference
-    """
-    reordered_states = torch.flip(states, dims=[0])
-    states_diff = torch.diff(reordered_states, n=1, dim=0)
-    return torch.hstack(
-        [
-            torch.ravel(reordered_states[0, :]),
-            torch.ravel(states_diff[0:position_memory, :])
-        ]
-    ).float()
-
-
 class DynamicalModel(gpytorch.models.ExactGP):
     """The base class for forward model of the system dynamics.
 
@@ -130,11 +38,7 @@ class DynamicalModel(gpytorch.models.ExactGP):
         states: torch.Tensor,
         actions: torch.Tensor,
         likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
-        position_memory: int = 2,
-        control_memory: int = 1,
     ):
-        self.position_memory = position_memory
-        self.control_memory = control_memory
 
         io_data = self.data_to_gp_input_output(
             states, actions
@@ -143,20 +47,9 @@ class DynamicalModel(gpytorch.models.ExactGP):
         self.num_outputs = self.training_outputs.shape[1]
         self.input_dimension = self.training_data.shape[1]
 
-        max_lookback = max(self.control_memory,self.position_memory)
         state_dim = states.shape[1]
         action_dim = actions.shape[1]
         num_samples = states.shape[0]
-
-        assert self.training_data.shape == (
-            num_samples-max_lookback,
-            state_dim * (1+self.position_memory) +
-            action_dim * (1+self.control_memory)
-        )
-
-        assert self.training_outputs.shape == (
-            num_samples-max_lookback, state_dim
-        )
 
         super(DynamicalModel, self).__init__(
             self.training_data,
@@ -171,6 +64,29 @@ class DynamicalModel(gpytorch.models.ExactGP):
             gpytorch.kernels.RBFKernel(), num_tasks=state_dim, rank=1
         )
 
+    def data_to_gp_output(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Transforms data into PILCO data format."""
+        val = torch.diff(states, n=1, dim=0)
+        if val.ndim == 1:
+            val = torch.atleast_2d(val).T
+        return val
+
+    def data_to_gp_input(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+            
+    ) -> torch.Tensor:
+        """Transforms data into PILCO data format."""
+        val = torch.hstack((states, actions))
+        if val.ndim == 1:
+            val = torch.atleast_2d(val).T
+        return val
+
     def data_to_gp_input_output(
         self,
         states: torch.Tensor,
@@ -178,17 +94,13 @@ class DynamicalModel(gpytorch.models.ExactGP):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Transforms data into PILCO data format."""
         return (
-            data_to_gp_input(
-                states,
-                actions,
-                self.control_memory,
-                self.position_memory,
+            self.data_to_gp_input(
+                states[1:],
+                actions[1:],
             ),
-            data_to_gp_output(
+            self.data_to_gp_output(
                 states,
                 actions,
-                self.control_memory,
-                self.position_memory,
             ),
         )
 

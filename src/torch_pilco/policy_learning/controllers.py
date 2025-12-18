@@ -1,7 +1,7 @@
 " Controllers for different use cases."
 import numpy as np
 import torch
-from scipy import signal
+from typing import Callable
 
 
 class Policy(torch.nn.Module):
@@ -34,7 +34,7 @@ class Policy(torch.nn.Module):
     def forward(
         self,
         states: torch.Tensor,
-        timepoint: float,
+        timepoint: float | None = None,
         p_dropout: float=0.0
     ):
         raise NotImplementedError()
@@ -222,7 +222,7 @@ class SumOfGaussians(Policy):
         u_max: float = 1.0,
         scale_factor: torch.Tensor | float| None = None,
         flg_drop: bool=True,
-        dtype: torch.dtype = torch.float64,
+        dtype: torch.dtype = torch.float32,
         device: torch.device | int | str = torch.device("cpu")
     ):
         super(SumOfGaussians, self).__init__(
@@ -237,9 +237,9 @@ class SumOfGaussians(Policy):
         self.num_basis = num_basis
         # get initial log lengthscales
         if lengthscales_init is None:
-            lengthscales_init = np.ones(state_dim)
+            lengthscales_init = np.ones((1,state_dim))
         self.log_lengthscales = torch.nn.Parameter(
-            torch.tensor(np.log(lengthscales_init), dtype=self.dtype, device=self.device).reshape([1, -1]),
+            torch.tensor(np.log(lengthscales_init), dtype=self.dtype, device=self.device),
             requires_grad=flg_train_lengthscales,
         )
         # get initial centers
@@ -280,12 +280,12 @@ class SumOfGaussians(Policy):
 
     def reinit(
         self,
-        lenghtscales_par: torch.Tensor,
+        lengthscales_par: torch.Tensor,
         centers_par: torch.Tensor,
         weight_par: torch.Tensor,
     ):
         self.log_lengthscales.data = torch.tensor(
-            np.log(lenghtscales_par), dtype=self.dtype, device=self.device
+            np.log(lengthscales_par), dtype=self.dtype, device=self.device
         ).reshape([1, -1])
         self.centers.data = (
             torch.tensor(centers_par, dtype=self.dtype, device=self.device)
@@ -299,7 +299,7 @@ class SumOfGaussians(Policy):
     def forward(
         self,
         states: torch.Tensor,
-        timepoint: float,
+        timepoint: float | None = None,
         p_dropout: float=0.0
     ):
         """
@@ -309,15 +309,14 @@ class SumOfGaussians(Policy):
         """
         # get the lengthscales from log
         lengthscales = torch.exp(self.log_lengthscales)
-        # unsqueeze states
-        states = states.reshape([-1, self.state_dim]).unsqueeze(1)
+        #states = states.reshape([-1, self.state_dim])
         states = states / self.scale_factor
         # normalize states and centers
         norm_states = states / lengthscales
         norm_centers = self.centers / lengthscales
         # get the square distance
-        dist = torch.sum(norm_states**2, dim=2, keepdim=True)
-        dist = dist + torch.sum(norm_centers**2, dim=1, keepdim=True).transpose(0, 1)
+        dist = torch.sum(torch.square(norm_states), dim=2, keepdim=True)
+        dist = dist + torch.sum(torch.square(norm_centers), dim=1, keepdim=True).transpose(0, 1)
         dist -= 2 * torch.matmul(norm_states, norm_centers.transpose(dim0=0, dim1=1))
         # apply exp and get output
         exp_dist_dropped = self.f_drop(torch.exp(-dist), p_dropout)
