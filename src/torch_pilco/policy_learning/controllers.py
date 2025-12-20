@@ -309,22 +309,22 @@ class SumOfGaussians(Policy):
         """
         # get the lengthscales from log
         lengthscales = torch.exp(self.log_lengthscales)
-        #states = states.reshape([-1, self.state_dim])
+        states = torch.atleast_2d(states)
         states = states / self.scale_factor
+
         # normalize states and centers
         norm_states = states / lengthscales
         norm_centers = self.centers / lengthscales
+        
         # get the square distance
-        dist = torch.sum(torch.square(norm_states), dim=2, keepdim=True)
-        dist = dist + torch.sum(torch.square(norm_centers), dim=1, keepdim=True).transpose(0, 1)
-        dist -= 2 * torch.matmul(norm_states, norm_centers.transpose(dim0=0, dim1=1))
+        dist = torch.square(norm_states.unsqueeze(1)-norm_centers).sum(dim=2)
+
         # apply exp and get output
-        exp_dist_dropped = self.f_drop(torch.exp(-dist), p_dropout)
-        inputs = self.f_linear(exp_dist_dropped).reshape([-1, self.input_dim])
+        exp_dist_dropped = self.f_drop(torch.exp(-0.5*dist), p_dropout)
+        inputs = self.f_linear(exp_dist_dropped)
 
         # returns the constrained control action
-        return self.f_squash(inputs)
-
+        return self.f_squash(inputs).squeeze(0)
 
 class SumOfGaussiansWithAngles(SumOfGaussians):
     """

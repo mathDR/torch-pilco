@@ -1,13 +1,13 @@
 """ The main model class. """
 
-__all__ = ["DynamicalModel", "IMGPR", "IMSVGPR"]
+__all__ = ["DynamicalModel"]
 import torch
 import gpytorch
 import numpy as np
 
 
-class DynamicalModel(gpytorch.models.ExactGP):
-    """The base class for forward model of the system dynamics.
+class ExactDynamicalModel(gpytorch.models.ExactGP):
+    """The base class for forward model of the system dynamics (uses Cholesky Deompositions).
 
     Heavily borrows from the gpytorch Multitask GP Regression example:
     https://github.com/cornellius-gp/gpytorch/blob/main/examples/03_Multitask_Exact_GPs/Multitask_GP_Regression.ipynb
@@ -48,14 +48,14 @@ class DynamicalModel(gpytorch.models.ExactGP):
         self.input_dimension = self.training_data.shape[1]
 
         state_dim = states.shape[1]
-        action_dim = actions.shape[1]
-        num_samples = states.shape[0]
 
-        super(DynamicalModel, self).__init__(
+        super(ExactDynamicalModel, self).__init__(
             self.training_data,
             self.training_outputs,
             likelihood,
         )
+
+        self.likelihood = likelihood
 
         self.mean_module = gpytorch.means.MultitaskMean(
             gpytorch.means.ConstantMean(), num_tasks=state_dim
@@ -79,7 +79,6 @@ class DynamicalModel(gpytorch.models.ExactGP):
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
-            
     ) -> torch.Tensor:
         """Transforms data into PILCO data format."""
         val = torch.hstack((states, actions))
@@ -112,31 +111,42 @@ class DynamicalModel(gpytorch.models.ExactGP):
             covar_x
         )
 
-
-def fit(
-    model,
-    likelihood,
+def ExactFit(
+    model: ExactDynamicalModel,
+    #likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
     *,
     print_loss: bool = False,
     n_training_iter: int = 100
 ) -> None:
     # Put in training mode
     model.train()
-    likelihood.train()
-    # Use the adam optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+    #likelihood.train()
+
+    # Initialize the LBFGS optimizer
+    optimizer = torch.optim.LBFGS(
+        [{'params': model.parameters()}],
+        lr=1,
+        max_iter=n_training_iter
+    )
 
     # "Loss" for GPs - the marginal log likelihood
-    mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
-
-    for i in range(n_training_iter):
+    mll = gpytorch.mlls.ExactMarginalLogLikelihood(model.likelihood, model)
+    # Define the closure function required by LBFGS
+    def closure():
+        # Clear gradients
         optimizer.zero_grad()
+        # Get output from the model
         output = model(model.training_data)
+        # Calc loss and backprop gradients
         loss = -mll(output, model.training_outputs)
         loss.backward()
         if print_loss:
-            print('Iter %d/%d - Loss: %.3f' % (i + 1, n_training_iter, loss.item()))
-        optimizer.step()
-    # Put in evaluation mode
+            print(loss)
+        return loss
+
+    # Run the optimizer step. LBFGS runs multiple evaluations within a single step
+    optimizer.step(closure)
+
+    # Set model to evaluation mode
     model.eval()
-    likelihood.eval()
+    #likelihood.eval()

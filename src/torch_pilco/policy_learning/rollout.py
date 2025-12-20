@@ -1,7 +1,7 @@
 """ Convert the Fitted GPyTorch model to a TorchRL enviornment."""
 import gpytorch
-import numpy as np
 from tensordict import TensorDict
+from typing import Union
 import torch
 import torchrl
 from torchrl.envs import EnvBase
@@ -12,28 +12,26 @@ from torchrl.data import (
     ReplayBuffer,
 )
 from typing import Callable
-from torch_pilco.model_learning.dynamical_models import DynamicalModel
-
+from torch_pilco.model_learning.dynamical_models import ExactDynamicalModel
 
 
 class GPyTorchEnv(EnvBase):
     # Wraps an existing GPyTorch model as a TorchRL environment
     def __init__( 
         self,
-        trained_model: DynamicalModel,
+        trained_model: ExactDynamicalModel,
         env: torchrl.envs.libs.gym.GymEnv,
-        reward_func: Callable[[torch.Tensor, torch.Tensor], float],
+        reward_func: Callable[[torch.Tensor, torch.Tensor], Union[torch.float32, torch.float64]],
         replay_buffer: ReplayBuffer,
-        device="cpu",
+        device: torch.device=torch.device("cpu"),
         batch_size: tuple | torch.Size | None = None,
     ) -> None:
         super(GPyTorchEnv, self).__init__(batch_size=batch_size)
         
         # custom property intialization - unique to this environment
-        self.dtype = np.float32
         self.gp_model = trained_model.to(device)
         self.gp_model.eval() # Set model to evaluation mode
-        self.reward_func = reward_func
+        self.reward_func = reward_func # can we populate this with the env.reward function?
         self.replay_buffer = replay_buffer
 
         self.device = device
@@ -62,13 +60,14 @@ class GPyTorchEnv(EnvBase):
         self.state_spec = self.observation_spec.clone()
 
         self.reward_spec = UnboundedContinuous(
-            shape=torch.Size([self.batch_size[0], 1])
+            shape=torch.Size([self.batch_size[0], 1]),
+            dtype=torch.float32,
         ) # unlimited reward space(even though we could limit it to (-17, 0] for the pendulum)
 
     def gen_states(self, batch_size: int) -> None:
         # init new state from the replay buffer
         replay_buffer_sample = self.replay_buffer.sample(batch_size)
-        self.state = replay_buffer_sample["observation"].float().reshape(self.batch_size[0],self.state_size)
+        self.state = replay_buffer_sample["observation"].reshape(self.batch_size[0],self.state_size).float()
     
     def _reset(self, tensordict: TensorDict | None = None):
         if tensordict is None or tensordict.is_empty():
@@ -77,7 +76,7 @@ class GPyTorchEnv(EnvBase):
             # parameters to get started.
             self.gen_states(batch_size=self.batch_size[0])
         else:
-            self.state = tensordict["observation"].float().reshape(self.batch_size[0],self.state_size)
+            self.state = tensordict["observation"].reshape(self.batch_size[0], self.state_size).float()
         
         out_tensordict = TensorDict({}, batch_size=self.batch_size)
         out_tensordict.set("observation", self.state)
@@ -96,16 +95,24 @@ class GPyTorchEnv(EnvBase):
             model_input = torch.vmap(
                 self.gp_model.data_to_gp_input,
                 in_dims=(0,0)
-            )(self.state.unsqueeze(1), action.unsqueeze(1))
-            self.state = torch.cat([self.gp_model(mi).sample() for mi in model_input])
+            )(self.state.unsqueeze(1).double(), action.unsqueeze(1).double())
+            with gpytorch.settings.cholesky_jitter(1.0):
+                try:
+                    self.state = torch.cat([self.gp_model(mi).rsample() for mi in model_input]).float()
+                except torch.linalg.LinAlgError:
+                    for mi in model_input:
+                        try:
+                            self.gp_model(mi).rsample()
+                        except torch.linalg.LinAlgError:
+                            print(mi)
+                            break
 
-        reward = torch.vmap(self.reward_func, in_dims=(0,0))(self.state, action).float()
+        reward = torch.vmap(self.reward_func, in_dims=(0,0))(self.state, action)
 
         out_tensordict = TensorDict(
             {
                 "observation": self.state,
                 "reward": reward,
-                #"done": False
             },
             batch_size=self.batch_size
         )
