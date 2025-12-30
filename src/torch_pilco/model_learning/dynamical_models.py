@@ -2,11 +2,13 @@
 
 __all__ = ["DynamicalModel"]
 import torch
+from botorch.models.gpytorch import GPyTorchModel
+from botorch.fit import fit_gpytorch_mll
 import gpytorch
 import numpy as np
 
 
-class ExactDynamicalModel(gpytorch.models.ExactGP):
+class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
     """The base class for forward model of the system dynamics (uses Cholesky Deompositions).
 
     Heavily borrows from the gpytorch Multitask GP Regression example:
@@ -38,13 +40,14 @@ class ExactDynamicalModel(gpytorch.models.ExactGP):
         states: torch.Tensor,
         actions: torch.Tensor,
         likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
+        bounds: torch.Tensor | None = None,
     ):
 
-        io_data = self.data_to_gp_input_output(
+        self.training_data, self.training_outputs = self.data_to_gp_input_output(
             states, actions
         )
-        self.training_data, self.training_outputs = io_data
-        self.num_outputs = self.training_outputs.shape[1]
+
+        self._num_outputs = self.training_outputs.shape[1]
         self.input_dimension = self.training_data.shape[1]
 
         state_dim = states.shape[1]
@@ -54,6 +57,9 @@ class ExactDynamicalModel(gpytorch.models.ExactGP):
             self.training_outputs,
             likelihood,
         )
+        self.bounds = bounds # Should be shape (2, num_outputs)
+        if bounds is not None:
+            assert bounds.shape == (2, self._num_outputs)
 
         self.likelihood = likelihood
 
@@ -64,6 +70,11 @@ class ExactDynamicalModel(gpytorch.models.ExactGP):
             gpytorch.kernels.RBFKernel(), num_tasks=state_dim, rank=1
         )
 
+    @property
+    def num_outputs(self) -> int:
+        """Read-only property required by the BoTorch Model API."""
+        return self._num_outputs
+        
     def data_to_gp_output(
         self,
         states: torch.Tensor,
@@ -106,47 +117,32 @@ class ExactDynamicalModel(gpytorch.models.ExactGP):
     def forward(self, x: torch.Tensor):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
-        return gpytorch.distributions.MultitaskMultivariateNormal(
+        return  gpytorch.distributions.MultitaskMultivariateNormal(
             mean_x,
             covar_x
         )
 
+    def sample(self, x: torch.Tensor, num_samples: int=1) -> torch.Tensor:
+        # Samples from the GP and rescales given the bounds
+        # Apply sigmoid to samples to enforce [0, 1] then rescale to self.bounds
+        samples = self(x).rsample()
+        if self.bounds is not None:
+            # Simple sigmoid squashing to [0, 1]
+            samples = torch.sigmoid(samples) 
+            # Rescale to [min, max]
+            low, high = self.bounds[0], self.bounds[1]
+            samples = low + (high - low) * samples
+        return samples
+
 def ExactFit(
     model: ExactDynamicalModel,
-    #likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
-    *,
-    print_loss: bool = False,
-    n_training_iter: int = 100
 ) -> None:
     # Put in training mode
     model.train()
-    #likelihood.train()
-
-    # Initialize the LBFGS optimizer
-    optimizer = torch.optim.LBFGS(
-        [{'params': model.parameters()}],
-        lr=1,
-        max_iter=n_training_iter
-    )
 
     # "Loss" for GPs - the marginal log likelihood
     mll = gpytorch.mlls.ExactMarginalLogLikelihood(model.likelihood, model)
-    # Define the closure function required by LBFGS
-    def closure():
-        # Clear gradients
-        optimizer.zero_grad()
-        # Get output from the model
-        output = model(model.training_data)
-        # Calc loss and backprop gradients
-        loss = -mll(output, model.training_outputs)
-        loss.backward()
-        if print_loss:
-            print(loss)
-        return loss
-
-    # Run the optimizer step. LBFGS runs multiple evaluations within a single step
-    optimizer.step(closure)
+    fit_gpytorch_mll(mll)
 
     # Set model to evaluation mode
     model.eval()
-    #likelihood.eval()

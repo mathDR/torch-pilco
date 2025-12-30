@@ -20,7 +20,10 @@ class GPyTorchEnv(EnvBase):
     def __init__( 
         self,
         trained_model: ExactDynamicalModel,
-        env: torchrl.envs.libs.gym.GymEnv,
+        state_size: int,
+        action_size: int,
+        action_space_low: float,
+        action_space_high: float,
         reward_func: Callable[[torch.Tensor, torch.Tensor], Union[torch.float32, torch.float64]],
         replay_buffer: ReplayBuffer,
         device: torch.device=torch.device("cpu"),
@@ -36,14 +39,14 @@ class GPyTorchEnv(EnvBase):
 
         self.device = device
 
-        self.state_size = env.observation_space.shape[0]
+        self.state_size = state_size
         assert self.state_size == self.gp_model.num_outputs, "Number of GP outputs needs to match true environment state."
-        self.action_size = env.action_space.shape[0]
+        self.action_size = action_size
         
         # specs
         self.action_spec = BoundedContinuous(
-            low=torch.tile(torch.from_numpy(env.action_space.low),(self.batch_size[0],self.action_size)),
-            high=torch.tile(torch.from_numpy(env.action_space.high),(self.batch_size[0],self.action_size)),
+            low=torch.tile(torch.from_numpy(action_space_low),(self.batch_size[0],self.action_size)),
+            high=torch.tile(torch.from_numpy(action_space_high),(self.batch_size[0],self.action_size)),
             device=self.device,
             dtype=torch.float32,
         )
@@ -67,7 +70,7 @@ class GPyTorchEnv(EnvBase):
     def gen_states(self, batch_size: int) -> None:
         # init new state from the replay buffer
         replay_buffer_sample = self.replay_buffer.sample(batch_size)
-        self.state = replay_buffer_sample["observation"].reshape(self.batch_size[0],self.state_size).float()
+        self.state = replay_buffer_sample["observation"][:,0,:].reshape(self.batch_size[0],self.state_size).float()
     
     def _reset(self, tensordict: TensorDict | None = None):
         if tensordict is None or tensordict.is_empty():
@@ -95,17 +98,9 @@ class GPyTorchEnv(EnvBase):
             model_input = torch.vmap(
                 self.gp_model.data_to_gp_input,
                 in_dims=(0,0)
-            )(self.state.unsqueeze(1).double(), action.unsqueeze(1).double())
-            with gpytorch.settings.cholesky_jitter(1.0):
-                try:
-                    self.state = torch.cat([self.gp_model(mi).rsample() for mi in model_input]).float()
-                except torch.linalg.LinAlgError:
-                    for mi in model_input:
-                        try:
-                            self.gp_model(mi).rsample()
-                        except torch.linalg.LinAlgError:
-                            print(mi)
-                            break
+            )(self.state.unsqueeze(1), action.unsqueeze(1))
+            with gpytorch.settings.cholesky_jitter(1e-4):
+                self.state = torch.cat([self.gp_model.sample(mi) for mi in model_input]).float()
 
         reward = torch.vmap(self.reward_func, in_dims=(0,0))(self.state, action)
 
