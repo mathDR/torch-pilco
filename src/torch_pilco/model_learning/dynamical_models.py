@@ -40,7 +40,6 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
         states: torch.Tensor,
         actions: torch.Tensor,
         likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
-        bounds: torch.Tensor | None = None,
     ):
 
         self.training_data, self.training_outputs = self.data_to_gp_input_output(
@@ -57,9 +56,6 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
             self.training_outputs,
             likelihood,
         )
-        self.bounds = bounds # Should be shape (2, num_outputs)
-        if bounds is not None:
-            assert bounds.shape == (2, self._num_outputs)
 
         self.likelihood = likelihood
 
@@ -123,16 +119,11 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
         )
 
     def sample(self, x: torch.Tensor, num_samples: int=1) -> torch.Tensor:
-        # Samples from the GP and rescales given the bounds
-        # Apply sigmoid to samples to enforce [0, 1] then rescale to self.bounds
+        # Samples from the GP
+        # Note this only produces the difference expectation, so to get
+        # actual states, we need to add back x
         samples = self(x).rsample()
-        if self.bounds is not None:
-            # Simple sigmoid squashing to [0, 1]
-            samples = torch.sigmoid(samples) 
-            # Rescale to [min, max]
-            low, high = self.bounds[0], self.bounds[1]
-            samples = low + (high - low) * samples
-        return samples
+        return x + samples
 
 def ExactFit(
     model: ExactDynamicalModel,
