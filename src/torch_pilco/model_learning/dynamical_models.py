@@ -34,6 +34,12 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
           to form the GP inputs.
         name (string): The name of the model.
     """
+    training_data: torch.Tensor
+    training_outputs: torch.Tensor
+    state_dim: int
+    likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood
+    mean_module: gpytorch.means.MultitaskMean
+    covar_module: gpytorch.kernels.MultitaskKernel
 
     def __init__(
         self,
@@ -49,7 +55,7 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
         self._num_outputs = self.training_outputs.shape[1]
         self.input_dimension = self.training_data.shape[1]
 
-        state_dim = states.shape[1]
+        self.state_dim = states.shape[1]
 
         super(ExactDynamicalModel, self).__init__(
             self.training_data,
@@ -59,12 +65,33 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
 
         self.likelihood = likelihood
 
+        #num_mixtures = 4 # Mixtures per spectral kernel
+
+        # 2. Create and initialize individual base kernels
+        # base_kernels = []
+        # for i in range(num_latents):
+        #     # Initialize a new SM kernel
+        #     sm_kernel = gpytorch.kernels.SpectralMixtureKernel(
+        #         num_mixtures=num_mixtures, 
+        #         ard_num_dims=self.input_dimension
+        #     )
+        #     # Crucial: Initialize from data to prevent poor convergence
+        #     sm_kernel.initialize_from_data(self.training_data, self.training_outputs)
+        #     base_kernels.append(sm_kernel)
+
         self.mean_module = gpytorch.means.MultitaskMean(
-            gpytorch.means.ConstantMean(), num_tasks=state_dim
+            gpytorch.means.ConstantMean(), num_tasks=self.state_dim
         )
-        self.covar_module = gpytorch.kernels.MultitaskKernel(
-            gpytorch.kernels.RBFKernel(), num_tasks=state_dim, rank=1
+        # self.covar_module = gpytorch.kernels.MultitaskKernel(
+        #     gpytorch.kernels.RBFKernel()+gpytorch.kernels.PolynomialKernel(power=2), num_tasks=self.state_dim, rank=1
+        # )
+        #self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([self.state_dim]))
+        self.covar_module = gpytorch.kernels.LCMKernel(
+            base_kernels=[gpytorch.kernels.RBFKernel() for _ in range(self._num_outputs)],
+            num_tasks=self.state_dim,
+            rank=1
         )
+
 
     @property
     def num_outputs(self) -> int:
@@ -113,17 +140,20 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
     def forward(self, x: torch.Tensor):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
-        return  gpytorch.distributions.MultitaskMultivariateNormal(
-            mean_x,
-            covar_x
+        # return  gpytorch.distributions.MultitaskMultivariateNormal(
+        #     mean_x,
+        #     covar_x
+        # )
+        return gpytorch.distributions.MultitaskMultivariateNormal.from_batch_mvn(
+            gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
         )
 
     def sample(self, x: torch.Tensor, num_samples: int=1) -> torch.Tensor:
         # Samples from the GP
         # Note this only produces the difference expectation, so to get
-        # actual states, we need to add back x
+        # actual states, we need to add back x (but not the action)
         samples = self(x).rsample()
-        return x + samples
+        return samples
 
 def ExactFit(
     model: ExactDynamicalModel,

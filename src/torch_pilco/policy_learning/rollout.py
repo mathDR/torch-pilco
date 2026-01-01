@@ -100,7 +100,9 @@ class GPyTorchEnv(EnvBase):
                 in_dims=(0,0)
             )(self.state.unsqueeze(1), action.unsqueeze(1))
             with gpytorch.settings.cholesky_jitter(1e-4):
-                self.state = torch.cat([self.gp_model.sample(mi) for mi in model_input]).float()
+                # Note the GP only predicts _differences_ so we need to add back the state to
+                # get the predicted state...
+                self.state = self.state + torch.cat([self.gp_model.sample(mi) for mi in model_input]).float()
 
         reward = torch.vmap(self.reward_func, in_dims=(0,0))(self.state, action)
 

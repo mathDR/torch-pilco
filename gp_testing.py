@@ -46,14 +46,13 @@ def main():
 
     device = torch.device("cpu")
 
-    frames_per_batch = 45
-    total_frames = 7*frames_per_batch
+    frames_per_batch = 35
+    total_frames = 16*frames_per_batch
     # make the batch version of our gym environment
     base_env = GymEnv("Pendulum-v1") 
     env = base_env.append_transform(BatchSizeTransform(reshape_fn=lambda x: x.unsqueeze(0)))
     print(check_env_specs(env))
     
-
     random_policy = RandomPolicy(env.action_spec)
     action_dim = env.action_space.shape[0]
     x = env.reset()
@@ -62,22 +61,8 @@ def main():
     num_particles = 400
     num_basis = 32
 
-    num_pilco_training_loops = 5
+    num_pilco_training_loops = 1
 
-    control_policy = SumOfGaussians(
-        state_dim,
-        action_dim,
-        num_basis,
-        u_max=env.action_space.high[0],
-        dtype=torch.float32,
-        device=device,
-    ) 
-    batched_policy = torch.vmap(control_policy, in_dims=0)
-    policy = TensorDictModule(
-        batched_policy,
-        in_keys=["observation"],
-        out_keys=["action"],
-    )
 
     # Store each interaction with the environment
     replay_buffer = ReplayBuffer(storage=LazyTensorStorage(10000))
@@ -101,7 +86,7 @@ def main():
         # Now grab some data and fit the GP
         # Use the whole buffer for data
         states, actions = build_pendulum_training_data(replay_buffer.sample(len(replay_buffer)))
-        states = states.reshape(-1,state_dim).
+        states = states.reshape(-1,state_dim)
         actions = actions.reshape(-1,action_dim)
 
         # We should take the bounds of the environmental outputs as inputs to force the model
@@ -117,54 +102,23 @@ def main():
             likelihood,
         )
         # Find optimal model hyperparameters
+        breakpoint()
+        mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+        print(-mll(model(model.training_data), model.training_outputs))
         ExactFit(model)
+        breakpoint()
+        print(-mll(model(model.training_data), model.training_outputs))
+        #  now check how well we predict the training data
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+        # The model should be called with current state + action to predict next state
+            model_input = torch.vmap(
+                model.data_to_gp_input,
+                in_dims=(0,0)
+            )(states.unsqueeze(1), actions.unsqueeze(1))
+            with gpytorch.settings.cholesky_jitter(1e-4):
+                new_states = states + torch.cat([model.sample(mi) for mi in model_input]).float()
+        breakpoint()
 
-        gp_env = GPyTorchEnv(
-            model,
-            state_dim,
-            action_dim,
-            env.action_space.low,
-            env.action_space.high,
-            pendulum_cost,
-            replay_buffer,
-            device=device,
-            batch_size=(num_particles,)
-        )
-        print(check_env_specs(gp_env))
-
-        if num_pilco_training_loops == 0:
-            N = 2_000
-        else:
-            N = 4_000
-
-        pbar = tqdm.tqdm(range(N // num_particles))
-        # Initalize the optimizer on the original control_policy parameters
-        optim = torch.optim.Adam(control_policy.parameters(), lr=1e-3)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, N)
-        logs = defaultdict(list)
-
-        for _ in pbar:
-            rollout = gp_env.rollout(35, policy)
-            traj_return = rollout["next", "reward"].mean(dim=0).sum()
-            traj_return.backward()
-            gn = torch.nn.utils.clip_grad_norm_(control_policy.parameters(), 1.0)
-            optim.step()
-            optim.zero_grad()
-            pbar.set_description(
-                f"reward: {traj_return: 4.4f}, "
-                f"last reward: {rollout[..., -1]['next', 'reward'].mean(): 4.4f}, gradient norm: {gn: 4.4}"
-            )
-            logs["return"].append(traj_return.item())
-            logs["last_reward"].append(rollout[..., -1]["next", "reward"].mean(dim=0).item())
-            scheduler.step()
-        env.reset()
-        # Now sample from true environment with optimized policy
-        collector = SyncDataCollector(
-            env,
-            policy=policy,
-            frames_per_batch=frames_per_batch,
-            total_frames=total_frames,
-        )
 
 if __name__ == '__main__':
     main()
