@@ -19,8 +19,14 @@ from torchrl.data import LazyTensorStorage
 from botorch.fit import fit_gpytorch_mll
 
 from torch_pilco.model_learning.dynamical_models import (
+    ApproximateDynamicalModel,
+    ApproximateFit,
     ExactDynamicalModel,
     ExactFit,
+)
+from torch_pilco.model_learning.likelihoods import (
+    TruncatedGaussianLikelihood,
+
 )
 from torch_pilco.policy_learning.controllers import SumOfGaussians
 from torch_pilco.rewards import pendulum_cost
@@ -101,23 +107,32 @@ def main():
         # Now grab some data and fit the GP
         # Use the whole buffer for data
         states, actions = build_pendulum_training_data(replay_buffer.sample(len(replay_buffer)))
-        states = states.reshape(-1,state_dim).
+        states = states.reshape(-1,state_dim)
         actions = actions.reshape(-1,action_dim)
 
         # We should take the bounds of the environmental outputs as inputs to force the model
         # To given outputs in this range.  Otherwise we may generate nonsensical values -- this
-        # means we should do a nice randomization over the environment
+        # means we should do a nice randomization over the environment -- to try to get close to the 
+        # bounds
 
-        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-            num_tasks=states.shape[1]
-        )
-        model = ExactDynamicalModel(
+        # likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+        #     num_tasks=states.shape[1]
+        # )
+        likelihood = TruncatedGaussianLikelihood(bounds=bounds)
+        # model = ExactDynamicalModel(
+        #     states,
+        #     actions,
+        #     likelihood,
+        # )
+        model = ApproximateDynamicalModel(
             states,
             actions,
             likelihood,
+            num_inducing_points=50,
         )
         # Find optimal model hyperparameters
-        ExactFit(model)
+        #ExactFit(model)
+        ApproximateFit(model)
 
         gp_env = GPyTorchEnv(
             model,
@@ -145,7 +160,10 @@ def main():
 
         for _ in pbar:
             rollout = gp_env.rollout(35, policy)
-            traj_return = rollout["next", "reward"].mean(dim=0).sum()
+            v = rollout["next", "reward"]
+            w = v.mean(dim=0)
+            #assert w.max() < 16.3, f"Whoops! {v.max()}, {states.min(dim=0)}, {states.max(dim=0)}, {actions.min()}, {actions.max()}" 
+            traj_return = w.sum()
             traj_return.backward()
             gn = torch.nn.utils.clip_grad_norm_(control_policy.parameters(), 1.0)
             optim.step()

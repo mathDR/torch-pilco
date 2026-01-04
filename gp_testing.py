@@ -19,8 +19,14 @@ from torchrl.data import LazyTensorStorage
 from botorch.fit import fit_gpytorch_mll
 
 from torch_pilco.model_learning.dynamical_models import (
+    ApproximateDynamicalModel,
+    ApproximateFit,
     ExactDynamicalModel,
     ExactFit,
+)
+from torch_pilco.model_learning.likelihoods import (
+    TruncatedGaussianLikelihood,
+
 )
 from torch_pilco.policy_learning.controllers import SumOfGaussians
 from torch_pilco.rewards import pendulum_cost
@@ -47,7 +53,7 @@ def main():
     device = torch.device("cpu")
 
     frames_per_batch = 35
-    total_frames = 16*frames_per_batch
+    total_frames = 6*frames_per_batch
     # make the batch version of our gym environment
     base_env = GymEnv("Pendulum-v1") 
     env = base_env.append_transform(BatchSizeTransform(reshape_fn=lambda x: x.unsqueeze(0)))
@@ -57,11 +63,6 @@ def main():
     action_dim = env.action_space.shape[0]
     x = env.reset()
     state_dim = x['observation'].shape[1]
-
-    num_particles = 400
-    num_basis = 32
-
-    num_pilco_training_loops = 1
 
 
     # Store each interaction with the environment
@@ -76,7 +77,7 @@ def main():
         reset_at_each_iter=True,
     )
 
-    for _ in range(num_pilco_training_loops):
+    for _ in range(1):
         # Put the data into the replay buffer
         for data in collector:
             # convert the tensordict from collector to a version
@@ -89,35 +90,47 @@ def main():
         states = states.reshape(-1,state_dim)
         actions = actions.reshape(-1,action_dim)
 
+        bounds = torch.vstack((states.min(dim=0)[0], states.max(dim=0)[0]))
+
         # We should take the bounds of the environmental outputs as inputs to force the model
         # To given outputs in this range.  Otherwise we may generate nonsensical values -- this
         # means we should do a nice randomization over the environment
 
-        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-            num_tasks=states.shape[1]
-        )
-        model = ExactDynamicalModel(
+        # likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+        #     num_tasks=states.shape[1]
+        # )
+        likelihood = TruncatedGaussianLikelihood(bounds=bounds)
+        # model = ExactDynamicalModel(
+        #     states,
+        #     actions,
+        #     likelihood,
+        # )
+        amodel = ApproximateDynamicalModel(
             states,
             actions,
             likelihood,
+            num_inducing_points=50,
         )
+        mll = gpytorch.mlls.VariationalELBO(amodel.likelihood, amodel, amodel.num_inducing_points)
+        ApproximateFit(amodel)
+        print(-mll(amodel(amodel.training_data), amodel.training_outputs))
+        breakpoint()
         # Find optimal model hyperparameters
-        breakpoint()
-        mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
-        print(-mll(model(model.training_data), model.training_outputs))
-        ExactFit(model)
-        breakpoint()
-        print(-mll(model(model.training_data), model.training_outputs))
+        # mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+        # print(-mll(model(model.training_data), model.training_outputs))
+        # ExactFit(model)
+        # breakpoint()
+        # print(-mll(model(model.training_data), model.training_outputs))
         #  now check how well we predict the training data
-        with torch.no_grad(), gpytorch.settings.fast_pred_var():
-        # The model should be called with current state + action to predict next state
-            model_input = torch.vmap(
-                model.data_to_gp_input,
-                in_dims=(0,0)
-            )(states.unsqueeze(1), actions.unsqueeze(1))
-            with gpytorch.settings.cholesky_jitter(1e-4):
-                new_states = states + torch.cat([model.sample(mi) for mi in model_input]).float()
-        breakpoint()
+        # with torch.no_grad(), gpytorch.settings.fast_pred_var():
+        # # The model should be called with current state + action to predict next state
+        #     model_input = torch.vmap(
+        #         model.data_to_gp_input,
+        #         in_dims=(0,0)
+        #     )(states.unsqueeze(1), actions.unsqueeze(1))
+        #     with gpytorch.settings.cholesky_jitter(1e-4):
+        #         new_states = states + torch.cat([model.sample(mi) for mi in model_input]).float()
+
 
 
 if __name__ == '__main__':

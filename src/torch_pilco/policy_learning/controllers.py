@@ -65,17 +65,17 @@ class Policy(torch.nn.Module):
 
     def squashing(
         self,
-        u: torch.Tensor | float,
+        x: torch.Tensor | float,
         u_max: torch.Tensor | float,
     ):
         """
         Squash the inputs inside (-u_max, +u_max)
         """
         if np.isscalar(u_max):
-            return u_max * torch.tanh(u / u_max)
+            return u_max * torch.tanh(x / u_max)
         else:
             u_max = torch.tensor(u_max, dtype=self.dtype, device=self.device)
-            return u_max * torch.tanh(u / u_max)
+            return u_max * torch.tanh(x / u_max)
 
     def get_np_policy(self):
         """
@@ -233,6 +233,7 @@ class SumOfGaussians(Policy):
             dtype=dtype,
             device=device
         )
+        self.u_max = u_max
         # set number of gaussian basis functions
         self.num_basis = num_basis
         # get initial log lengthscales
@@ -324,7 +325,7 @@ class SumOfGaussians(Policy):
         inputs = self.f_linear(exp_dist_dropped)
 
         # returns the constrained control action
-        return self.f_squash(inputs).squeeze(0)
+        return torch.clip(self.f_squash(inputs).squeeze(0), -self.u_max, self.u_max)
 
 class SumOfGaussiansWithAngles(SumOfGaussians):
     """

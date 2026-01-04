@@ -1,85 +1,24 @@
 """ The main model class. """
 
-__all__ = ["DynamicalModel"]
+__all__ = ["DynamicalModel", "ExactDynamicalModel"]
 import torch
 from botorch.models.gpytorch import GPyTorchModel
 from botorch.fit import fit_gpytorch_mll
 import gpytorch
 import numpy as np
+import tqdm
 
 
-class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
-    """The base class for forward model of the system dynamics (uses Cholesky Deompositions).
+class DynamicalModel(torch.nn.Module):
+    """ Generic methods all dynamical models need."""
 
-    Heavily borrows from the gpytorch Multitask GP Regression example:
-    https://github.com/cornellius-gp/gpytorch/blob/main/examples/03_Multitask_Exact_GPs/Multitask_GP_Regression.ipynb
-
-    Args:
-        states (ArrayLike): The input states $x_t$.
-        actions (ArrayLike): The input controls $u_t.$
-        kernel_funcs (AbstractKernel): The kernel function(s) for each GP. If
-          there are multiple outputs but a single kernel is passed, each GP
-          will get this kernel.
-        mean_funcs (AbstractMeanFunction): The mean function(s) for each GP.
-          If there are multiple outputs, but a single mean is passed, each
-          GP will get this mean. If left blank, will default to zero mean
-        likelihood (AbstractLikelihood): The likelihood of the posterior. If
-          there are multiple outputs and a single likelihood is passed, each
-          GP will get that likelihood. If left blank, will default to a
-          Gaussian Likelihood.
-        models: The GP model(s) for each output dimension.
-        position_memory (Int): the number of previous states that are included
-          to form the GP inputs.
-        control_memory (Int): the number of previous actions that are included
-          to form the GP inputs.
-        name (string): The name of the model.
-    """
-    training_data: torch.Tensor
-    training_outputs: torch.Tensor
-    state_dim: int
-    likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood
-    mean_module: gpytorch.means.MultitaskMean
-    covar_module: gpytorch.kernels.MultitaskKernel
-
-    def __init__(
-        self,
-        states: torch.Tensor,
-        actions: torch.Tensor,
-        likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
-    ):
-
-        self.training_data, self.training_outputs = self.data_to_gp_input_output(
-            states, actions
-        )
-
-        self._num_outputs = self.training_outputs.shape[1]
-        self.input_dimension = self.training_data.shape[1]
-
-        self.state_dim = states.shape[1]
-
-        super(ExactDynamicalModel, self).__init__(
-            self.training_data,
-            self.training_outputs,
-            likelihood,
-        )
-
-        self.likelihood = likelihood
-
-        self.mean_module = gpytorch.means.MultitaskMean(
-            gpytorch.means.ConstantMean(), num_tasks=self.state_dim
-        )
-        self.covar_module = gpytorch.kernels.LCMKernel(
-            base_kernels=[gpytorch.kernels.RBFKernel() for _ in range(self._num_outputs)],
-            num_tasks=self.state_dim,
-            rank=1
-        )
-
+    _num_outputs: int
 
     @property
     def num_outputs(self) -> int:
         """Read-only property required by the BoTorch Model API."""
         return self._num_outputs
-        
+
     def data_to_gp_output(
         self,
         states: torch.Tensor,
@@ -119,6 +58,60 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
             ),
         )
 
+
+class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel):
+    """Forward model of the system dynamics with LCM kernel (uses Cholesky Deompositions).
+
+    Heavily borrows from the gpytorch Multitask GP Regression example:
+    https://github.com/cornellius-gp/gpytorch/blob/main/examples/03_Multitask_Exact_GPs/Multitask_GP_Regression.ipynb
+
+    Args:
+        states (torch.Tensor): The input states $x_t$.
+        actions (torch.Tensor): The input controls $u_t.$
+        likelihood (AbstractLikelihood): The likelihood of the posterior. If
+          there are multiple outputs and a single likelihood is passed, each
+          GP will get that likelihood. If left blank, will default to a
+          Gaussian Likelihood.
+
+        TODO: allow for passing in a list of kernels and/or means
+    """
+    training_data: torch.Tensor
+    training_outputs: torch.Tensor
+    state_dim: int
+    input_dimension: int
+    likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood
+
+    mean_module: gpytorch.means.MultitaskMean
+    covar_module: gpytorch.kernels.MultitaskKernel
+
+    def __init__(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
+    ):
+
+        self.training_data, self.training_outputs = self.data_to_gp_input_output(
+            states, actions
+        )
+
+        self.input_dimension = self.training_data.shape[1]
+        self.state_dim = states.shape[1]
+
+        self._num_outputs = self.training_outputs.shape[1]
+
+        self.likelihood = likelihood
+
+        self.mean_module = gpytorch.means.MultitaskMean(
+            gpytorch.means.ConstantMean(), num_tasks=self.state_dim
+        )
+        self.covar_module = gpytorch.kernels.LCMKernel(
+            base_kernels=[gpytorch.kernels.RBFKernel() for _ in range(self.state_dim)],
+            num_tasks=self.state_dim,
+            rank=1
+        )
+
+
     def forward(self, x: torch.Tensor):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
@@ -134,6 +127,87 @@ class ExactDynamicalModel(gpytorch.models.ExactGP, GPyTorchModel):
         samples = self(x).rsample()
         return samples
 
+
+class ApproximateDynamicalModel(DynamicalModel, gpytorch.models.ApproximateGP, GPyTorchModel):
+    """Forward model of the system dynamics with LCM kernel.
+
+    Heavily borrows from the gpytorch Multitask GP Regression example:
+    https://github.com/cornellius-gp/gpytorch/blob/main/examples/03_Multitask_Exact_GPs/Multitask_GP_Regression.ipynb
+
+    Args:
+        states (torch.Tensor): The input states $x_t$.
+        actions (torch.Tensor): The input controls $u_t.$
+        likelihood (AbstractLikelihood): The likelihood of the posterior. If
+          there are multiple outputs and a single likelihood is passed, each
+          GP will get that likelihood. If left blank, will default to a
+          Gaussian Likelihood.
+
+        TODO: allow for passing in a list of kernels and/or means
+    """
+    mean_module: gpytorch.means.MultitaskMean
+    covar_module: gpytorch.kernels.MultitaskKernel
+    num_inducing_points: int
+
+    def __init__(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
+        *,
+        num_inducing_points: int,
+    ):
+
+        num_latents = states.shape[1]
+
+        inducing_points = torch.rand(num_latents, num_inducing_points, states.shape[1]+actions.shape[1])
+
+        # We have to mark the CholeskyVariationalDistribution as batch
+        # so that we learn a variational distribution for each task
+        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+            inducing_points.size(-2), batch_shape=torch.Size([num_latents])
+        )
+
+        # We have to wrap the VariationalStrategy in a LMCVariationalStrategy
+        # so that the output will be a MultitaskMultivariateNormal rather than a batch output
+        variational_strategy = gpytorch.variational.LMCVariationalStrategy(
+            gpytorch.variational.VariationalStrategy(
+                self, inducing_points, variational_distribution, learn_inducing_locations=True
+            ),
+            num_tasks=num_latents,
+            num_latents=num_latents,
+            latent_dim=-1
+        )
+
+        gpytorch.models.ApproximateGP.__init__(self, variational_strategy)
+
+        self.training_data, self.training_outputs = self.data_to_gp_input_output(
+            states, actions
+        )
+
+        self.input_dimension = self.training_data.shape[1]
+        self.state_dim = states.shape[1]
+
+        self._num_outputs = self.training_outputs.shape[1]
+
+        self.num_inducing_points = num_inducing_points
+
+        self.likelihood = likelihood
+
+        # The mean and covariance modules should be marked as batch
+        # so we learn a different set of hyperparameters
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([num_latents]))
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(batch_shape=torch.Size([num_latents])),
+            batch_shape=torch.Size([num_latents])
+        )
+
+
+    def forward(self, x: torch.Tensor):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+
 def ExactFit(
     model: ExactDynamicalModel,
 ) -> None:
@@ -145,4 +219,40 @@ def ExactFit(
     fit_gpytorch_mll(mll)
 
     # Set model to evaluation mode
+    model.eval()
+
+
+def ApproximateFit(
+    model: ApproximateDynamicalModel,
+) -> None:
+    # Put in training mode
+    # model.train()
+
+    # # "Loss" for GPs - the marginal log likelihood
+    # mll = gpytorch.mlls.VariationalELBO(model.likelihood, model, model.num_inducing_points)
+    # fit_gpytorch_mll(mll)
+
+    # # Set model to evaluation mode
+    # model.eval()
+    num_epochs = 500
+
+    model.train()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+
+    # Our loss object. We're using the VariationalELBO, which essentially just computes the ELBO
+    mll = gpytorch.mlls.VariationalELBO(model.likelihood, model, num_data=model.training_outputs.size(0))
+
+    # We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
+    # effective for VI.
+    # epochs_iter = tqdm.tqdm_notebook(range(num_epochs), desc="Epoch")
+    for i in range(num_epochs):
+        # Within each iteration, we will go over each minibatch of data
+        optimizer.zero_grad()
+        output = model(model.training_data)
+        loss = -mll(output, model.training_outputs)
+        epochs_iter.set_postfix(loss=loss.item())
+        loss.backward()
+        optimizer.step()
+
     model.eval()
