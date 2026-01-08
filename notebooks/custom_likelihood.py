@@ -71,15 +71,6 @@ model = MultitaskGPModel()
 base_likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=num_tasks)
 
 
-# In[58]:
-
-
-torch.tile(torch.tensor(1e-4), (4,)).shape
-
-
-# In[67]:
-
-
 class MultivariateTruncatedNormalLikelihood(Likelihood):
     """
     A custom likelihood for multivariate truncated normal distributions that
@@ -89,10 +80,8 @@ class MultivariateTruncatedNormalLikelihood(Likelihood):
     def __init__(
         self,
         num_tasks: int,
-        rank: int=0,
         truncation_bounds: torch.Tensor=None,
-        noise_constraint: float | None=None,
-        batch_shape: torch.Size = torch.Size([]),
+        prior_noise: float=1e-4,
         **kwargs
     ) -> None:
         """
@@ -108,13 +97,11 @@ class MultivariateTruncatedNormalLikelihood(Likelihood):
         super().__init__()
 
         self.num_tasks = num_tasks
-        self.rank = rank
         
-        if noise_constraint is None:
-            noise_constraint = GreaterThan(1e-4)
+        self.noise_covar = torch.diag_embed(prior_noise, batch_shape=torch.Size([num_tasks]))
+        self.register_parameter(name="noise_diag", parameter=torch.nn.Paramter(torch.ones(num_tasks)))
         
-        self.register_parameter(name="raw_noise", parameter=torch.nn.Parameter(torch.zeros(*batch_shape, 1)))
-        self.register_constraint("raw_noise", noise_constraint)
+        self.register_constraint("noise_diag", self.noise_covar)
        
         # Store truncation bounds
         self.truncation_bounds = truncation_bounds
@@ -127,9 +114,9 @@ class MultivariateTruncatedNormalLikelihood(Likelihood):
    
     @property
     def noise(self) -> torch.Tensor:
-        return self.raw_noise_constraint.transform(self.raw_noise)
+        return self.raw_noise_constraint.transform(self.noise_covar)
     
-    def forward(self, function_samples, targets=None, **kwargs):
+    def forward(self, function_samples, **kwargs):
         """
         Forward pass to compute the likelihood.
        
@@ -266,9 +253,6 @@ breakpoint()
 -mll(model(train_x), train_y)
 
 
-# In[12]:
-
-
 # this is for running the notebook in our testing framework
 import os
 smoke_test = ('CI' in os.environ)
@@ -282,60 +266,48 @@ optimizer = torch.optim.Adam([
     {'params': likelihood.parameters()},
 ], lr=0.1)
 
-
-
 # We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
 # effective for VI.
-epochs_iter = tqdm.tqdm_notebook(range(num_epochs), desc="Epoch")
-for i in epochs_iter:
-    # Within each iteration, we will go over each minibatch of data
-    optimizer.zero_grad()
-    output = model(train_x)
-    loss = -base_mll(output, train_y)
-    epochs_iter.set_postfix(loss=loss.item())
-    loss.backward()
-    optimizer.step()
+with gpytorch.settings.num_likelihood_samples(15):
+    epochs_iter = tqdm.tqdm_notebook(range(num_epochs), desc="Epoch")
+    for i in epochs_iter:
+        # Within each iteration, we will go over each minibatch of data
+        optimizer.zero_grad()
+        output = model(train_x)
+        loss = -base_mll(output, train_y)
+        epochs_iter.set_postfix(loss=loss.item())
+        loss.backward()
+        optimizer.step()
+
+# # Set into eval mode
+# model.eval()
+# likelihood.eval()
+
+# # Initialize plots
+# fig, axs = plt.subplots(1, num_tasks, figsize=(4 * num_tasks, 3))
+
+# # Make predictions
+# with torch.no_grad(), gpytorch.settings.fast_pred_var():
+#     test_x = torch.linspace(0, 1, 51)
+#     predictions = likelihood(model(test_x))
+#     mean = predictions.mean
+#     lower, upper = predictions.confidence_region()
+
+# for task, ax in enumerate(axs):
+#     # Plot training data as black stars
+#     ax.plot(train_x.detach().numpy(), train_y[:, task].detach().numpy(), 'k*')
+#     # Predictive mean as blue line
+#     ax.plot(test_x.numpy(), mean[:, task].numpy(), 'b')
+#     # Shade in confidence
+#     ax.fill_between(test_x.numpy(), lower[:, task].numpy(), upper[:, task].numpy(), alpha=0.5)
+#     ax.set_ylim([-3, 3])
+#     ax.legend(['Observed Data', 'Mean', 'Confidence'])
+#     ax.set_title(f'Task {task + 1}')
+
+# fig.tight_layout()
+# None
 
 
-# In[ ]:
-
-
-
-
-
-# In[9]:
-
-
-# Set into eval mode
-model.eval()
-likelihood.eval()
-
-# Initialize plots
-fig, axs = plt.subplots(1, num_tasks, figsize=(4 * num_tasks, 3))
-
-# Make predictions
-with torch.no_grad(), gpytorch.settings.fast_pred_var():
-    test_x = torch.linspace(0, 1, 51)
-    predictions = likelihood(model(test_x))
-    mean = predictions.mean
-    lower, upper = predictions.confidence_region()
-
-for task, ax in enumerate(axs):
-    # Plot training data as black stars
-    ax.plot(train_x.detach().numpy(), train_y[:, task].detach().numpy(), 'k*')
-    # Predictive mean as blue line
-    ax.plot(test_x.numpy(), mean[:, task].numpy(), 'b')
-    # Shade in confidence
-    ax.fill_between(test_x.numpy(), lower[:, task].numpy(), upper[:, task].numpy(), alpha=0.5)
-    ax.set_ylim([-3, 3])
-    ax.legend(['Observed Data', 'Mean', 'Confidence'])
-    ax.set_title(f'Task {task + 1}')
-
-fig.tight_layout()
-None
-
-
-# In[ ]:
 
 
 

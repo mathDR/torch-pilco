@@ -19,14 +19,10 @@ from torchrl.data import LazyTensorStorage
 from botorch.fit import fit_gpytorch_mll
 
 from torch_pilco.model_learning.dynamical_models import (
-    ApproximateDynamicalModel,
-    ApproximateFit,
+    #ApproximateDynamicalModel,
+    #ApproximateFit,
     ExactDynamicalModel,
     ExactFit,
-)
-from torch_pilco.model_learning.likelihoods import (
-    TruncatedGaussianLikelihood,
-
 )
 from torch_pilco.policy_learning.controllers import SumOfGaussians
 from torch_pilco.rewards import pendulum_cost
@@ -115,24 +111,25 @@ def main():
         # means we should do a nice randomization over the environment -- to try to get close to the 
         # bounds
 
-        # likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-        #     num_tasks=states.shape[1]
-        # )
-        likelihood = TruncatedGaussianLikelihood(bounds=bounds)
-        # model = ExactDynamicalModel(
-        #     states,
-        #     actions,
-        #     likelihood,
-        # )
-        model = ApproximateDynamicalModel(
+        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+            num_tasks=states.shape[1]
+        )
+        #likelihood = TruncatedGaussianLikelihood(bounds=bounds)
+        model = ExactDynamicalModel(
             states,
             actions,
             likelihood,
-            num_inducing_points=50,
         )
+        model.float()
+        # model = ApproximateDynamicalModel(
+        #     states,
+        #     actions,
+        #     likelihood,
+        #     num_inducing_points=50,
+        # )
         # Find optimal model hyperparameters
-        #ExactFit(model)
-        ApproximateFit(model)
+        ExactFit(model)
+        #ApproximateFit(model)
 
         gp_env = GPyTorchEnv(
             model,

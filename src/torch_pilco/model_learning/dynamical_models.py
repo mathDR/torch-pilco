@@ -99,6 +99,7 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
         self.state_dim = states.shape[1]
 
         self._num_outputs = self.training_outputs.shape[1]
+        super().__init__(self.training_data, self.training_outputs, likelihood)
 
         self.likelihood = likelihood
 
@@ -106,7 +107,9 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
             gpytorch.means.ConstantMean(), num_tasks=self.state_dim
         )
         self.covar_module = gpytorch.kernels.LCMKernel(
-            base_kernels=[gpytorch.kernels.RBFKernel() for _ in range(self.state_dim)],
+            base_kernels=[
+            gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(set_ard_dims=self.input_dimension)) for _ in range(self.state_dim)
+            ],
             num_tasks=self.state_dim,
             rank=1
         )
