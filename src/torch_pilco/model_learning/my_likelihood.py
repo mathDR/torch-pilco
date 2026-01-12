@@ -6,83 +6,8 @@ from botorch.utils.probability.truncated_multivariate_normal import TruncatedMul
 from torch import Tensor
 from torch.distributions import Distribution
 from typing import Any
+from torch_pilco.model_learning.multitask_truncated_multivariate_normal import MultitaskTruncatedMultivariateNormal
 
-
-class BatchedTruncatedDistribution(Distribution):
-    """
-    A batched truncated multivariate normal distribution.
-    Handles each batch element independently since TruncatedMultivariateNormal
-    doesn't properly support batching.
-    """
-    
-    def __init__(self, mean: Tensor, covar: Tensor, bounds: Tensor) -> None:
-        self.loc = mean  # Use 'loc' to match PyTorch distribution API
-        self.covariance_matrix = covar
-        self._bounds = bounds
-        batch_size = mean.shape[0]
-        num_tasks = mean.shape[1]
-        
-        # Initialize the Distribution base class
-        super().__init__(
-            batch_shape=torch.Size([batch_size]),
-            event_shape=torch.Size([num_tasks]),
-            validate_args=False
-        )
-        
-        # Create individual truncated distributions for each batch element
-        self.dists = []
-        for i in range(batch_size):
-            dist = TruncatedMultivariateNormal(
-                loc=mean[i],
-                covariance_matrix=covar[i],
-                bounds=bounds[i],
-                validate_args=False
-            )
-            self.dists.append(dist)
-    
-    @property
-    def mean(self) -> Tensor:
-        """Return the mean of the distribution"""
-        return self.loc
-    
-    @property
-    def variance(self) -> Tensor:
-        """Return the diagonal variance"""
-        return torch.diagonal(self.covariance_matrix, dim1=-2, dim2=-1)
-    
-    def rsample(self, sample_shape: torch.Size = torch.Size()) -> Tensor:
-        # Sample from each batch element independently
-        samples = []
-        for dist in self.dists:
-            sample = dist.rsample(sample_shape)
-            samples.append(sample)
-        
-        # Stack along batch dimension
-        return torch.stack(samples, dim=-2)
-    
-    def log_prob(self, value: Tensor) -> Tensor:
-        # Compute log prob for each batch element
-        log_probs = []
-        for i, dist in enumerate(self.dists):
-            lp = dist.log_prob(value[..., i, :])
-            log_probs.append(lp)
-        
-        return torch.stack(log_probs, dim=-1)
-    
-    def confidence_region(self) -> tuple[Tensor, Tensor]:
-        """
-        Return approximate confidence region (mean ± 2 std).
-        Note: For truncated distributions, this is an approximation.
-        """
-        std = torch.sqrt(self.variance)
-        lower = self.mean - 2 * std
-        upper = self.mean + 2 * std
-        
-        # Clip to bounds to ensure validity
-        lower = torch.max(lower, self._bounds[..., 0])
-        upper = torch.min(upper, self._bounds[..., 1])
-        
-        return lower, upper
 
 
 class TruncatedMultitaskLikelihood(MultitaskGaussianLikelihood):
@@ -119,7 +44,7 @@ class TruncatedMultitaskLikelihood(MultitaskGaussianLikelihood):
         function_dist: MultitaskMultivariateNormal, 
         *args: Any, 
         **kwargs: Any
-    ) -> BatchedTruncatedDistribution:
+    ) -> MultitaskTruncatedMultivariateNormal:
         """
         Returns a wrapper that provides rsample and log_prob for truncated distribution.
         
@@ -130,7 +55,7 @@ class TruncatedMultitaskLikelihood(MultitaskGaussianLikelihood):
             function_dist: MultitaskMultivariateNormal from GP
             
         Returns:
-            BatchedTruncatedDistribution with rsample() and log_prob() methods
+            MultitaskTruncatedMultivariateNormal with rsample() and log_prob() methods
         """
         # MultitaskMultivariateNormal mean has shape [batch_size, num_tasks]
         mean = function_dist.mean
@@ -171,7 +96,7 @@ class TruncatedMultitaskLikelihood(MultitaskGaussianLikelihood):
         # Expand bounds to match actual dimensions [batch_size, num_tasks, 2]
         bounds = self.bounds.unsqueeze(0).expand(batch_size, -1, -1)
         
-        return BatchedTruncatedDistribution(mean, full_covar, bounds)
+        return MultitaskTruncatedMultivariateNormal(mean, full_covar, bounds)
     
     def expected_log_prob(
         self, 
