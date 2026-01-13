@@ -166,7 +166,7 @@ class ApproximateDynamicalModel(DynamicalModel, gpytorch.models.ApproximateGP, G
 
         # We have to mark the CholeskyVariationalDistribution as batch
         # so that we learn a variational distribution for each task
-        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+        variational_distribution = gpytorch.variational.TrilNaturalVariationalDistribution(
             inducing_points.size(-2), batch_shape=torch.Size([num_latents])
         )
 
@@ -240,22 +240,23 @@ def ApproximateFit(
     num_epochs = 500
 
     model.train()
+    variational_ngd_optimizer = gpytorch.optim.NGD(model.variational_parameters(), num_data=model.training_outputs.size(0), lr=0.1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+    hyperparameter_optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
 
     # Our loss object. We're using the VariationalELBO, which essentially just computes the ELBO
     mll = gpytorch.mlls.VariationalELBO(model.likelihood, model, num_data=model.training_outputs.size(0))
 
     # We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
     # effective for VI.
-    # epochs_iter = tqdm.tqdm_notebook(range(num_epochs), desc="Epoch")
     for i in range(num_epochs):
         # Within each iteration, we will go over each minibatch of data
-        optimizer.zero_grad()
+        variational_ngd_optimizer.zero_grad()
+        hyperparameter_optimizer.zero_grad()
         output = model(model.training_data)
         loss = -mll(output, model.training_outputs)
-        epochs_iter.set_postfix(loss=loss.item())
         loss.backward()
-        optimizer.step()
+        variational_ngd_optimizer.step()
+        hyperparameter_optimizer.step()
 
     model.eval()
