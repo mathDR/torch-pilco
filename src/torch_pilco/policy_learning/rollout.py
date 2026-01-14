@@ -102,6 +102,7 @@ class GPyTorchEnv(EnvBase):
             with gpytorch.settings.cholesky_jitter(1e-4):
                 # Note the GP only predicts _differences_ so we need to add back the state to
                 # get the predicted state...
+                breakpoint()
                 self.state = self.state + torch.cat(
                     [self.gp_model.likelihood(self.gp_model(mi)).rsample() for mi in model_input]
                 ).float()

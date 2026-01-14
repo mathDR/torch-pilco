@@ -76,6 +76,7 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
             mean_tmvn = loc.reshape(*loc.shape[:-2], -1)
         else:
             mean_tmvn = loc.transpose(-1, -2).reshape(*loc.shape[:-2], -1)
+            breakpoint()
         super().__init__(loc=mean_tmvn, covariance_matrix=covariance_matrix, bounds=bounds, validate_args=validate_args)
 
 

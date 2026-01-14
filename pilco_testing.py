@@ -19,14 +19,16 @@ from torchrl.data import LazyTensorStorage
 from botorch.fit import fit_gpytorch_mll
 
 from torch_pilco.model_learning.dynamical_models import (
-    #ApproximateDynamicalModel,
-    #ApproximateFit,
-    ExactDynamicalModel,
-    ExactFit,
+    ApproximateDynamicalModel,
+    ApproximateFit,
+    #ExactDynamicalModel,
+    #ExactFit,
 )
 from torch_pilco.policy_learning.controllers import SumOfGaussians
 from torch_pilco.rewards import pendulum_cost
 from torch_pilco.policy_learning.rollout import GPyTorchEnv
+
+from torch_pilco.model_learning.multitask_truncated_normal_likelihood import MultitaskTruncatedNormalLikelihood
 
 
 def build_pendulum_training_data(
@@ -92,6 +94,11 @@ def main():
         frames_per_batch=frames_per_batch,
         reset_at_each_iter=True,
     )
+    bounds = torch.tensor([
+        [-1., 1.],   # Task 1: x
+        [-1., 1.],   # Task 2: y
+        [-8., 8.],   # Task 3: theta dot
+    ])
 
     for _ in range(num_pilco_training_loops):
         # Put the data into the replay buffer
@@ -111,25 +118,25 @@ def main():
         # means we should do a nice randomization over the environment -- to try to get close to the 
         # bounds
 
-        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-            num_tasks=states.shape[1]
-        )
-        #likelihood = TruncatedGaussianLikelihood(bounds=bounds)
-        model = ExactDynamicalModel(
-            states,
-            actions,
-            likelihood,
-        )
-        model.float()
-        # model = ApproximateDynamicalModel(
+        #likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+        #    num_tasks=states.shape[1]
+        #)
+        likelihood = MultitaskTruncatedNormalLikelihood(num_tasks=states.shape[1], bounds=bounds)
+        # model = ExactDynamicalModel(
         #     states,
         #     actions,
         #     likelihood,
-        #     num_inducing_points=50,
         # )
+        #model.float()
+        model = ApproximateDynamicalModel(
+            states,
+            actions,
+            likelihood,
+            num_inducing_points=50,
+        )
         # Find optimal model hyperparameters
-        ExactFit(model)
-        #ApproximateFit(model)
+        #ExactFit(model)
+        ApproximateFit(model)
 
         gp_env = GPyTorchEnv(
             model,
@@ -157,6 +164,7 @@ def main():
 
         for _ in pbar:
             rollout = gp_env.rollout(35, policy)
+            breakpoint()
             v = rollout["next", "reward"]
             w = v.mean(dim=0)
             #assert w.max() < 16.3, f"Whoops! {v.max()}, {states.min(dim=0)}, {states.max(dim=0)}, {actions.min()}, {actions.max()}" 
