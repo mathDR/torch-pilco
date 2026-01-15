@@ -15,9 +15,10 @@ from linear_operator.operators import (
 from torch import Tensor
 
 from gpytorch.constraints import GreaterThan, Interval
-
+from gpytorch.distributions import MultitaskMultivariateNormal
 from gpytorch.likelihoods import Likelihood
 from gpytorch.priors import Prior
+from gpytorch.lazy import LazyEvaluatedKernelTensor
 
 from torch_pilco.model_learning.multitask_truncated_multivariate_normal import MultitaskTruncatedMultivariateNormal
 
@@ -190,54 +191,9 @@ class MultitaskTruncatedNormalLikelihood(Likelihood):
 
         return covar_kron_lt
     
-    
-    # def marginal(
-    #     self, function_dist: MultitaskMultivariateNormal, *args: Any, **kwargs: Any
-    # ) -> MultitaskTruncatedMultivariateNormal:  # pyre-ignore[14]
-    #     r"""
-    #     If :math:`\text{rank} = 0`, adds the task noises to the diagonal of the
-    #     covariance matrix of the supplied
-    #     :obj:`~gpytorch.distributions.MultivariateNormal` or
-    #     :obj:`~gpytorch.distributions.MultitaskMultivariateNormal`.  Otherwise,
-    #     adds a rank `rank` covariance matrix to it.
-
-    #     To accomplish this, we form a new
-    #     :obj:`~linear_operator.operators.KroneckerProductLinearOperator`
-    #     between :math:`I_{n}`, an identity matrix with size equal to the data
-    #     and a (not necessarily diagonal) matrix containing the task noises
-    #     :math:`D_{t}`.
-
-    #     We also incorporate a shared `noise` parameter from the base
-    #     :class:`gpytorch.likelihoods.GaussianLikelihood` that we extend.
-
-    #     The final covariance matrix after this method is then
-    #     :math:`\mathbf K + \mathbf D_{t} \otimes \mathbf I_{n} + \sigma^{2} \mathbf I_{nt}`.
-
-    #     :param function_dist: Random variable whose covariance
-    #         matrix is a :obj:`~linear_operator.operators.LinearOperator` we intend to augment.
-    #     :rtype: `gpytorch.distributions.MultitaskMultivariateNormal`:
-    #     :return: A new random variable whose covariance matrix is a
-    #         :obj:`~linear_operator.operators.LinearOperator` with
-    #         :math:`\mathbf D_{t} \otimes \mathbf I_{n}` and :math:`\sigma^{2} \mathbf I_{nt}` added.
-    #     """
-    #     mean, covar = function_dist.mean, function_dist.lazy_covariance_matrix
-
-    #     # ensure that sumKroneckerLT is actually called
-    #     if isinstance(covar, LazyEvaluatedKernelTensor):
-    #         covar = covar.evaluate_kernel()
-
-    #     covar_kron_lt = self._shaped_noise_covar(
-    #         mean.shape, add_noise=self.has_global_noise, interleaved=function_dist._interleaved
-    #     )
-    #     covar = covar + covar_kron_lt
-
-    #     return MultitaskTruncatedMultivariateNormal(loc=mean, covariance_matrix=covar, bounds=self.bounds, interleaved=function_dist._interleaved)
 
     def forward(self, function_samples: Tensor, *params: Any, **kwargs: Any) -> MultitaskTruncatedMultivariateNormal:
-        #noise = self._shaped_noise_covar(function_samples.shape, *params, **kwargs)#.diagonal(dim1=-1, dim2=-2)
-        #noise = noise.reshape(*noise.shape[:-1], *function_samples.shape[-2:])
         covar_kron_lt = self._shaped_noise_covar(
             function_samples.shape, add_noise=self.has_global_noise,
         )
-        bounds = torch.tile(self.bounds, (function_samples.shape[0], function_samples.shape[1], 1))
-        return MultitaskTruncatedMultivariateNormal(loc=function_samples, covariance_matrix=covar_kron_lt, bounds=bounds)
+        return MultitaskTruncatedMultivariateNormal(loc=function_samples, covariance_matrix=covar_kron_lt, bounds=self.bounds)

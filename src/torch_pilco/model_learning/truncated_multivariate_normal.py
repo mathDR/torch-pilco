@@ -31,8 +31,6 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
     :param bounds: `N x 2` tensor of bounds.
     :param validate_args: If True, validate `loc` anad `covariance_matrix` arguments. (Default: False.)
 
-    :ivar torch.Size base_sample_shape: The shape of a base sample (without
-        batching) that is used to generate a single sample.
     :ivar torch.Tensor covariance_matrix: The covariance matrix, represented as a dense :class:`torch.Tensor`
     :ivar ~linear_operator.LinearOperator lazy_covariance_matrix: The covariance matrix, represented
         as a :class:`~linear_operator.LinearOperator`.
@@ -55,7 +53,7 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
             cs2 = covariance_matrix.size(-2)
             if not (ms == cs1 and ms == cs2):
                 raise ValueError(f"Wrong shapes in {self._repr_sizes(loc, covariance_matrix)}")
-        #self.__unbroadcasted_scale_tril = None
+
         self._validate_args = validate_args
         batch_shape = torch.broadcast_shapes(loc.shape[:-1], covariance_matrix.shape[:-2])
         event_shape = loc.shape[-1:]
@@ -75,26 +73,11 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
         """
         if not isinstance(sample_shape, torch.Size):
             sample_shape = torch.Size(sample_shape)
-        return sample_shape + self._batch_shape + self.base_sample_shape
+        return sample_shape + self._batch_shape
 
     @staticmethod
     def _repr_sizes(loc: Tensor, covariance_matrix: Union[Tensor, LinearOperator], bounds: Tensor) -> str:
         return f"TruncatedMultivariateNormal(loc: {loc.size()}, scale: {covariance_matrix.size()}, bounds: {bounds.size()})"
-
-    # @property
-    # def _unbroadcasted_scale_tril(self) -> Tensor:
-    #     if self.islazy and self.__unbroadcasted_scale_tril is None:
-    #         # cache root decoposition
-    #         ust = to_dense(self.lazy_covariance_matrix.cholesky())
-    #         self.__unbroadcasted_scale_tril = ust
-    #     return self.__unbroadcasted_scale_tril
-
-    # @_unbroadcasted_scale_tril.setter
-    # def _unbroadcasted_scale_tril(self, ust: Tensor):
-    #     if self.islazy:
-    #         raise NotImplementedError("Cannot set _unbroadcasted_scale_tril for lazy TMVN distributions")
-    #     else:
-    #         self.__unbroadcasted_scale_tril = ust
 
     def add_jitter(self, noise: float = 1e-4) -> TruncatedMultivariateNormal:
         r"""
@@ -108,13 +91,6 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
             bounds=self.bounds
         )
 
-    @property
-    def base_sample_shape(self) -> torch.Size:
-        base_sample_shape = self.event_shape
-        if isinstance(self.lazy_covariance_matrix, RootLinearOperator):
-            base_sample_shape = self.lazy_covariance_matrix.root.shape[-1:]
-
-        return base_sample_shape
 
     @lazy_property
     def covariance_matrix(self) -> Tensor:
@@ -163,7 +139,7 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
                 batch_size + self.__unbroadcasted_scale_tril.shape[-2:]
             )
             super(TruncatedMultivariateNormal, new).__init__(loc=new_loc, scale_tril=new_scale_tril, bounds=new_bounds)
-            # Set the covar matrix, since it is always available for GPyTorch MVN.
+            # Set the covar matrix, since it is always available for GPyTorch TMVN.
             new.covariance_matrix = self.covariance_matrix.expand(batch_size + self.covariance_matrix.shape[-2:])
         return new
 
@@ -244,7 +220,6 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
     def stddev(self) -> Tensor:
         # self.variance is guaranteed to be positive, because we do clamping.
         return self.variance.sqrt()
-
 
     @property
     def variance(self) -> Tensor:

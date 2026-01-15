@@ -44,7 +44,7 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
             raise RuntimeError("The covariance of a MultitaskTruncatedMultivariateNormal must be a Tensor or LinearOperator")
         
         if not torch.is_tensor(bounds):
-            raise RuntimeError("The bounds of a MultitasTruncatedMultivariateNormal must be a Tensor")
+            raise RuntimeError("The bounds of a MultitaskTruncatedMultivariateNormal must be a Tensor")
 
         if loc.dim() < 2:
             raise RuntimeError("mean should be a matrix or a batch matrix (batch mode)")
@@ -72,12 +72,20 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
         # TODO: Instead of transpose / view operations, use a PermutationLinearOperator (see #539)
         # to handle interleaving
         self._interleaved = interleaved
+        breakpoint()
         if self._interleaved:
             mean_tmvn = loc.reshape(*loc.shape[:-2], -1)
         else:
             mean_tmvn = loc.transpose(-1, -2).reshape(*loc.shape[:-2], -1)
-            breakpoint()
-        super().__init__(loc=mean_tmvn, covariance_matrix=covariance_matrix, bounds=bounds, validate_args=validate_args)
+        if loc.dim() == 3:
+            # loc is (b, n, t) bounds needs to be (b, n*t, 2)
+            b, n, _ = loc.shape
+            extended_bounds = bounds.repeat(b, n, 1)
+        else:
+            # loc is of shape (n, t) bounds needs to be (n*t,2)
+            n, _ = loc.shape
+            extended_bounds = bounds.repeat(n, 1)
+        super().__init__(loc=mean_tmvn, covariance_matrix=covariance_matrix, bounds=extended_bounds, validate_args=validate_args)
 
 
     @property
@@ -100,7 +108,7 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
 
     @property
     def mean(self):
-        mean = super().loc
+        mean = self.loc
         if not self._interleaved:
             # flip shape of last two dimensions
             new_shape = self._output_shape[:-2] + self._output_shape[:-3:-1]
@@ -112,6 +120,7 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
         return self._output_shape[-1]
 
     def rsample(self, sample_shape=torch.Size()):
+        breakpoint()
         samples = super().rsample(sample_shape=sample_shape)
         if not self._interleaved:
             # flip shape of last two dimensions

@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import torch
 import gpytorch
 from gpytorch.likelihoods import Likelihood, MultitaskGaussianLikelihood
@@ -82,23 +80,22 @@ bounds = torch.tensor([
     [-1.7, 1.5],   # Task 4: -cos
 ])
 assert (torch.all(train_y.min(dim=0)[0] >= bounds[:, 0]) and torch.all(train_y.max(dim=0)[0] <= bounds[:, 1]))
-
+base_likelihood = MultitaskGaussianLikelihood(num_tasks=num_tasks)
 # Create the likelihood
 likelihood = MultitaskTruncatedNormalLikelihood(
     num_tasks=num_tasks,
     bounds=bounds,
 )
 
-
-mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
+mll = gpytorch.mlls.VariationalELBO(base_likelihood, model, num_data=train_y.size(0))
 num_epochs = 50
 
 model.train()
-likelihood.train()
+base_likelihood.train()
 hyperparameter_optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
 
 # Our loss object. We're using the VariationalELBO, which essentially just computes the ELBO
-mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
+#mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
 # We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
 # effective for VI.
@@ -113,13 +110,13 @@ for i in range(num_epochs):
 
 # Set into eval mode
 model.eval()
-likelihood.eval()
+base_likelihood.eval()
 
 
 # ## Evaluate at Test Data
 test_x = torch.linspace(0, 1, 51)
 test_y = model(test_x)
-
+breakpoint()
 # predictive_dist = TruncatedMultivariateNormal(
 #     loc=test_y.mean.flatten(),
 #     covariance_matrix=test_y.covariance_matrix,

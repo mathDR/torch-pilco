@@ -5,8 +5,6 @@ import torch
 from botorch.models.gpytorch import GPyTorchModel
 from botorch.fit import fit_gpytorch_mll
 import gpytorch
-import numpy as np
-import tqdm
 
 
 class DynamicalModel(torch.nn.Module):
@@ -25,7 +23,8 @@ class DynamicalModel(torch.nn.Module):
         actions: torch.Tensor,
     ) -> torch.Tensor:
         """Transforms data into PILCO data format."""
-        val = torch.diff(states, n=1, dim=0)
+        #val = torch.diff(states, n=1, dim=0)
+        val = states
         if val.ndim == 1:
             val = torch.atleast_2d(val).T
         return val
@@ -48,9 +47,13 @@ class DynamicalModel(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Transforms data into PILCO data format."""
         return (
+            # self.data_to_gp_input(
+            #     states[1:],
+            #     actions[1:],
+            # ),
             self.data_to_gp_input(
-                states[1:],
-                actions[1:],
+                states,
+                actions,
             ),
             self.data_to_gp_output(
                 states,
@@ -79,6 +82,7 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
     training_outputs: torch.Tensor
     state_dim: int
     input_dimension: int
+    bounds: torch.Tensor
     likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood
 
     mean_module: gpytorch.means.MultitaskMean
@@ -108,7 +112,7 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
         )
         self.covar_module = gpytorch.kernels.LCMKernel(
             base_kernels=[
-            gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel(set_ard_dims=self.input_dimension)) for _ in range(self.state_dim)
+                gpytorch.kernels.RBFKernel(set_ard_dims=self.input_dimension) for _ in range(self.state_dim)
             ],
             num_tasks=self.state_dim,
             rank=1
@@ -118,16 +122,11 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
     def forward(self, x: torch.Tensor):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
-        return  gpytorch.distributions.MultitaskMultivariateNormal(
-            mean_x,
-            covar_x
-        )
+        return  gpytorch.distributions.MultitaskMultivariateNormal(mean_x, covar_x)
 
     def sample(self, x: torch.Tensor, num_samples: int=1) -> torch.Tensor:
         # Samples from the GP
-        # Note this only produces the difference expectation, so to get
-        # actual states, we need to add back x (but not the action)
-        samples = self(x).rsample()
+        samples = self(x).rsample(torch.Size([num_samples]))
         return samples
 
 
@@ -240,9 +239,9 @@ def ApproximateFit(
     num_epochs = 500
 
     model.train()
-    variational_ngd_optimizer = gpytorch.optim.NGD(model.variational_parameters(), num_data=model.training_outputs.size(0), lr=0.1)
-
-    hyperparameter_optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+    #variational_ngd_optimizer = gpytorch.optim.NGD(model.variational_parameters(), num_data=model.training_outputs.size(0), lr=0.1)
+    #hyperparameter_optimizer = torch.optim.Adam(model.hyperparameters(), lr=0.1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
 
     # Our loss object. We're using the VariationalELBO, which essentially just computes the ELBO
     mll = gpytorch.mlls.VariationalELBO(model.likelihood, model, num_data=model.training_outputs.size(0))
@@ -251,12 +250,14 @@ def ApproximateFit(
     # effective for VI.
     for i in range(num_epochs):
         # Within each iteration, we will go over each minibatch of data
-        variational_ngd_optimizer.zero_grad()
-        hyperparameter_optimizer.zero_grad()
+        #variational_ngd_optimizer.zero_grad()
+        #hyperparameter_optimizer.zero_grad()
+        optimizer.zero_grad()
         output = model(model.training_data)
         loss = -mll(output, model.training_outputs)
         loss.backward()
-        variational_ngd_optimizer.step()
-        hyperparameter_optimizer.step()
+        #variational_ngd_optimizer.step()
+        #hyperparameter_optimizer.step()
+        optimizer.step()
 
     model.eval()
