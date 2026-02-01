@@ -21,14 +21,14 @@ from botorch.fit import fit_gpytorch_mll
 from torch_pilco.model_learning.dynamical_models import (
     ApproximateDynamicalModel,
     ApproximateFit,
-    #ExactDynamicalModel,
-    #ExactFit,
+    ExactDynamicalModel,
+    ExactFit,
 )
 from torch_pilco.policy_learning.controllers import SumOfGaussians
 from torch_pilco.rewards import pendulum_cost
 from torch_pilco.policy_learning.rollout import GPyTorchEnv
 
-from torch_pilco.model_learning.multitask_truncated_normal_likelihood import MultitaskTruncatedNormalLikelihood
+from torch_pilco.model_learning.multitask_truncated_gaussian_likelihood import MultitaskTruncatedGaussianLikelihood
 
 
 def build_pendulum_training_data(
@@ -38,15 +38,15 @@ def build_pendulum_training_data(
 
 
 def main():
-    if torch.cuda.is_available():
-        print("GPU is available. Using GPU backend.")
-        device = torch.device("cuda:0")
-    elif torch.backends.mps.is_available():
-        print("MPS is available. Using MPS backend.")
-        device = torch.device("mps")
-    else:
-        print("MPS not available. Falling back to CPU.")
-        device = torch.device("cpu")
+    # if torch.cuda.is_available():
+    #     print("GPU is available. Using GPU backend.")
+    #     device = torch.device("cuda:0")
+    # elif torch.backends.mps.is_available():
+    #     print("MPS is available. Using MPS backend.")
+    #     device = torch.device("mps")
+    # else:
+    #     print("MPS not available. Falling back to CPU.")
+    #     device = torch.device("cpu")
 
     device = torch.device("cpu")
 
@@ -57,14 +57,13 @@ def main():
     env = base_env.append_transform(BatchSizeTransform(reshape_fn=lambda x: x.unsqueeze(0)))
     print(check_env_specs(env))
     
-
     random_policy = RandomPolicy(env.action_spec)
     action_dim = env.action_space.shape[0]
     x = env.reset()
     state_dim = x['observation'].shape[1]
 
     num_particles = 400
-    num_basis = 32
+    num_basis = 64
 
     num_pilco_training_loops = 5
 
@@ -110,33 +109,39 @@ def main():
         # Now grab some data and fit the GP
         # Use the whole buffer for data
         states, actions = build_pendulum_training_data(replay_buffer.sample(len(replay_buffer)))
-        states = states.reshape(-1,state_dim)
-        actions = actions.reshape(-1,action_dim)
+        states = states.reshape(-1,state_dim).to(device)
+        actions = actions.reshape(-1,action_dim).to(device)
 
         # We should take the bounds of the environmental outputs as inputs to force the model
         # To given outputs in this range.  Otherwise we may generate nonsensical values -- this
         # means we should do a nice randomization over the environment -- to try to get close to the 
         # bounds
 
-        #likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-        #    num_tasks=states.shape[1]
-        #)
-        likelihood = MultitaskTruncatedNormalLikelihood(num_tasks=states.shape[1], bounds=bounds)
-        # model = ExactDynamicalModel(
-        #     states,
-        #     actions,
-        #     likelihood,
-        # )
-        #model.float()
-        model = ApproximateDynamicalModel(
-            states,
-            actions,
-            likelihood,
-            num_inducing_points=50,
-        )
-        # Find optimal model hyperparameters
-        #ExactFit(model)
-        ApproximateFit(model)
+        if True:
+            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+               num_tasks=states.shape[1]
+            ).double().to(device)
+            model = ExactDynamicalModel(
+                states,
+                actions,
+                likelihood,
+            )
+            model.double().to(device)
+            ExactFit(model)
+        else:
+            likelihood = MultitaskTruncatedGaussianLikelihood(
+                num_tasks=states.shape[1],
+                bounds=bounds
+            )
+            
+            model = ApproximateDynamicalModel(
+                states,
+                actions,
+                likelihood,
+                num_inducing_points=50,
+            )
+            # Find optimal model hyperparameters
+            ApproximateFit(model)
 
         gp_env = GPyTorchEnv(
             model,
@@ -158,13 +163,13 @@ def main():
 
         pbar = tqdm.tqdm(range(N // num_particles))
         # Initalize the optimizer on the original control_policy parameters
-        optim = torch.optim.Adam(control_policy.parameters(), lr=1e-3)
+        #optim = torch.optim.Adam(control_policy.parameters(), lr=1e-3)
+        optim = torch.optim.Muon(control_policy.parameters(), lr=0.02)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, N)
         logs = defaultdict(list)
 
         for _ in pbar:
             rollout = gp_env.rollout(35, policy)
-            breakpoint()
             v = rollout["next", "reward"]
             w = v.mean(dim=0)
             #assert w.max() < 16.3, f"Whoops! {v.max()}, {states.min(dim=0)}, {states.max(dim=0)}, {actions.min()}, {actions.max()}" 
@@ -188,6 +193,7 @@ def main():
             frames_per_batch=frames_per_batch,
             total_frames=total_frames,
         )
+    breakpoint()
 
 if __name__ == '__main__':
     main()

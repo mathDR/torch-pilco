@@ -72,7 +72,6 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
         # TODO: Instead of transpose / view operations, use a PermutationLinearOperator (see #539)
         # to handle interleaving
         self._interleaved = interleaved
-        breakpoint()
         if self._interleaved:
             mean_tmvn = loc.reshape(*loc.shape[:-2], -1)
         else:
@@ -85,7 +84,8 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
             # loc is of shape (n, t) bounds needs to be (n*t,2)
             n, _ = loc.shape
             extended_bounds = bounds.repeat(n, 1)
-        super().__init__(loc=mean_tmvn, covariance_matrix=covariance_matrix, bounds=extended_bounds, validate_args=validate_args)
+        breakpoint()
+        super().__init__(mean=mean_tmvn, covariance_matrix=covariance_matrix, bounds=extended_bounds, validate_args=validate_args)
 
 
     @property
@@ -120,7 +120,6 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
         return self._output_shape[-1]
 
     def rsample(self, sample_shape=torch.Size()):
-        breakpoint()
         samples = super().rsample(sample_shape=sample_shape)
         if not self._interleaved:
             # flip shape of last two dimensions
@@ -136,6 +135,23 @@ class MultitaskTruncatedMultivariateNormal(TruncatedMultivariateNormal):
             new_shape = self._output_shape[:-2] + self._output_shape[:-3:-1]
             return var.view(new_shape).transpose(-1, -2).contiguous()
         return var.view(self._output_shape)
+
+    # @property
+    # def confidence_region(self) -> Tuple[Tensor, Tensor]:
+    #     """
+    #     Returns 2 standard deviations above and below the mean.
+
+    #     :return: Pair of tensors of size `... x N`, where N is the
+    #         dimensionality of the random variable. The first (second) Tensor is the
+    #         lower (upper) end of the confidence region.  We clip this against the bounds
+    #         since it is not analytic to compute this accurately.
+    #     """
+    #     std2 = self.variance.sqrt().mul_(2)
+    #     mu = self.mean
+    #     return (
+    #         torch.max(torch.min(mu.sub(std2), self.bounds[:mu.shape[-1],1]), self.bounds[:mu.shape[-1],0]),
+    #         torch.max(torch.min(mu.add(std2), self.bounds[:mu.shape[-1],1]), self.bounds[:mu.shape[-1],0]),
+    #     )
 
     def __getitem__(self, idx) -> TruncatedMultivariateNormal:
         """

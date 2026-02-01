@@ -20,14 +20,12 @@ class DynamicalModel(torch.nn.Module):
     def data_to_gp_output(
         self,
         states: torch.Tensor,
-        actions: torch.Tensor,
     ) -> torch.Tensor:
         """Transforms data into PILCO data format."""
-        #val = torch.diff(states, n=1, dim=0)
         val = states
         if val.ndim == 1:
             val = torch.atleast_2d(val).T
-        return val
+        return val[1:,:]
 
     def data_to_gp_input(
         self,
@@ -47,17 +45,12 @@ class DynamicalModel(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Transforms data into PILCO data format."""
         return (
-            # self.data_to_gp_input(
-            #     states[1:],
-            #     actions[1:],
-            # ),
             self.data_to_gp_input(
                 states,
                 actions,
-            ),
+            )[:-1, :],
             self.data_to_gp_output(
                 states,
-                actions,
             ),
         )
 
@@ -110,14 +103,24 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
         self.mean_module = gpytorch.means.MultitaskMean(
             gpytorch.means.ConstantMean(), num_tasks=self.state_dim
         )
+        # Put a prior on the covariance structure.  The LKJ with eta = 1 assumes (prior)  noncorrelated outputs
+        # sd_prior_instance = gpytorch.priors.HalfNormalPrior(0.5)
+        # task_covar_prior = gpytorch.priors.LKJCovariancePrior(
+        #     n=self.state_dim, 
+        #     eta=1.0,
+        #     sd_prior=sd_prior_instance,
+        # )
+        # base_kernels = []
+        # for i in range(self._num_outputs):
+        #     k = gpytorch.kernels.SpectralMixtureKernel(num_mixtures=3, ard_num_dims=self.input_dimension)
+        #     k.initialize_from_data(self.training_data, self.training_outputs[i])
+        #     base_kernels.append(k)
         self.covar_module = gpytorch.kernels.LCMKernel(
-            base_kernels=[
-                gpytorch.kernels.RBFKernel(set_ard_dims=self.input_dimension) for _ in range(self.state_dim)
-            ],
+            base_kernels=[gpytorch.kernels.RBFKernel(ard_num_dims=self.input_dimension) for i in range(self._num_outputs)],
             num_tasks=self.state_dim,
-            rank=1
+            rank=1,
+            #task_covar_prior=task_covar_prior
         )
-
 
     def forward(self, x: torch.Tensor):
         mean_x = self.mean_module(x)
@@ -177,7 +180,7 @@ class ApproximateDynamicalModel(DynamicalModel, gpytorch.models.ApproximateGP, G
             ),
             num_tasks=num_latents,
             num_latents=num_latents,
-            latent_dim=-1
+            latent_dim=-1,
         )
 
         gpytorch.models.ApproximateGP.__init__(self, variational_strategy)
@@ -200,9 +203,9 @@ class ApproximateDynamicalModel(DynamicalModel, gpytorch.models.ApproximateGP, G
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([num_latents]))
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.RBFKernel(batch_shape=torch.Size([num_latents])),
-            batch_shape=torch.Size([num_latents])
+            batch_shape=torch.Size([num_latents]),
+            task_covar_prior=task_covar_prior
         )
-
 
     def forward(self, x: torch.Tensor):
         mean_x = self.mean_module(x)
@@ -219,7 +222,20 @@ def ExactFit(
     # "Loss" for GPs - the marginal log likelihood
     mll = gpytorch.mlls.ExactMarginalLogLikelihood(model.likelihood, model)
     fit_gpytorch_mll(mll)
+    # num_epochs = 250
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
 
+    # for i in range(num_epochs):
+    #     # Within each iteration, we will go over each minibatch of data
+    #     #variational_ngd_optimizer.zero_grad()
+    #     #hyperparameter_optimizer.zero_grad()
+    #     optimizer.zero_grad()
+    #     output = model(model.training_data)
+    #     loss = -mll(output, model.training_outputs)
+    #     loss.backward()
+    #     #variational_ngd_optimizer.step()
+    #     #hyperparameter_optimizer.step()
+    #     optimizer.step()
     # Set model to evaluation mode
     model.eval()
 
@@ -234,9 +250,7 @@ def ApproximateFit(
     # mll = gpytorch.mlls.VariationalELBO(model.likelihood, model, model.num_inducing_points)
     # fit_gpytorch_mll(mll)
 
-    # # Set model to evaluation mode
-    # model.eval()
-    num_epochs = 500
+    num_epochs = 250
 
     model.train()
     #variational_ngd_optimizer = gpytorch.optim.NGD(model.variational_parameters(), num_data=model.training_outputs.size(0), lr=0.1)
@@ -260,4 +274,5 @@ def ApproximateFit(
         #hyperparameter_optimizer.step()
         optimizer.step()
 
+    # Set model to evaluation mode
     model.eval()

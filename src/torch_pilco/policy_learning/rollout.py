@@ -59,9 +59,7 @@ class GPyTorchEnv(EnvBase):
             observation=observation_spec,
             shape=self.batch_size,
         ) # has to be CompositeSpec per the docs
-
         self.state_spec = self.observation_spec.clone()
-
         self.reward_spec = UnboundedContinuous(
             shape=torch.Size([self.batch_size[0], 1]),
             dtype=torch.float32,
@@ -97,13 +95,10 @@ class GPyTorchEnv(EnvBase):
             # The model should be called with current state + action to predict next state
             model_input = torch.vmap(
                 self.gp_model.data_to_gp_input,
-                in_dims=(0,0)
-            )(self.state.unsqueeze(1), action.unsqueeze(1))
+                in_dims=0,
+            )(self.state.unsqueeze(1), action.unsqueeze(1)).double()
             with gpytorch.settings.cholesky_jitter(1e-4):
-                # Note the GP only predicts _differences_ so we need to add back the state to
-                # get the predicted state...
-                breakpoint()
-                self.state = self.state + torch.cat(
+                self.state = torch.cat(
                     [self.gp_model.likelihood(self.gp_model(mi)).rsample() for mi in model_input]
                 ).float()
 

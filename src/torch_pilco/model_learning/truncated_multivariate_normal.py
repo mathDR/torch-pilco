@@ -18,7 +18,7 @@ from gpytorch.utils.warnings import NumericalWarning
 from gpytorch.distributions import Distribution
 
 
-class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
+class TruncatedMultivariateNormal(TruncMultivariateNormal):#, Distribution):
     """
     Constructs a truncated multivariate normal random variable, based on mean, covariance and bounds.
     Can be truncated multivariate, or a batch of truncated multivariate normals
@@ -26,42 +26,33 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
     Passing a vector mean corresponds to a truncated multivariate normal.
     Passing a matrix mean corresponds to a batch of truncated multivariate normals.
 
-    :param loc: `... x N` mean of tmvn distribution.
+    :param mean: `... x N` mean of tmvn distribution.
     :param covariance_matrix: `... x N X N` covariance matrix of tmvn distribution.
     :param bounds: `N x 2` tensor of bounds.
-    :param validate_args: If True, validate `loc` anad `covariance_matrix` arguments. (Default: False.)
+    :param validate_args: If True, validate `mean` anad `covariance_matrix` arguments. (Default: False.)
 
     :ivar torch.Tensor covariance_matrix: The covariance matrix, represented as a dense :class:`torch.Tensor`
     :ivar ~linear_operator.LinearOperator lazy_covariance_matrix: The covariance matrix, represented
         as a :class:`~linear_operator.LinearOperator`.
-    :ivar torch.Tensor loc: The mean.
+    :ivar torch.Tensor mean: The mean.
     :ivar torch.Tensor stddev: The standard deviation.
     :ivar torch.Tensor variance: The variance.
     """
 
     def __init__(
         self,
-        loc: Union[Tensor, LinearOperator],
+        mean: Union[Tensor, LinearOperator],
         covariance_matrix: Union[Tensor, LinearOperator],
         bounds: Tensor,
         validate_args: bool = False,
     ):
-        self._islazy = isinstance(loc, LinearOperator) or isinstance(covariance_matrix, LinearOperator)
-        if validate_args:
-            ms = loc.size(-1)
-            cs1 = covariance_matrix.size(-1)
-            cs2 = covariance_matrix.size(-2)
-            if not (ms == cs1 and ms == cs2):
-                raise ValueError(f"Wrong shapes in {self._repr_sizes(loc, covariance_matrix)}")
-
-        self._validate_args = validate_args
-        batch_shape = torch.broadcast_shapes(loc.shape[:-1], covariance_matrix.shape[:-2])
-        event_shape = loc.shape[-1:]
-
-        # TODO: Integrate argument validation for LinearOperators into torch.distribution validation logic
-        Distribution.__init__(self, batch_shape, event_shape, validate_args=False)
-        TruncMultivariateNormal.__init__(self, loc=loc, covariance_matrix=covariance_matrix, bounds=bounds, validate_args=validate_args)
-
+        self._islazy = False
+        if isinstance(mean, LinearOperator):
+            mean = mean.to_dense()
+        if isinstance(covariance_matrix, LinearOperator):
+            covariance_matrix=covariance_matrix.to_dense()
+        super().__init__(loc=mean, covariance_matrix=covariance_matrix, bounds=bounds, validate_args=validate_args)
+        
     def _extended_shape(self, sample_shape: torch.Size = torch.Size()) -> torch.Size:
         """
         Returns the size of the sample returned by the distribution, given
@@ -98,19 +89,6 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
             return self.covariance_matrix.to_dense()
         else:
             return super().covariance_matrix
-
-    def confidence_region(self) -> Tuple[Tensor, Tensor]:
-        """
-        Returns 2 standard deviations above and below the mean.
-
-        :return: Pair of tensors of size `... x N`, where N is the
-            dimensionality of the random variable. The first (second) Tensor is the
-            lower (upper) end of the confidence region.  We clip this against the bounds
-            since it is not analytic to compute this accurately.
-        """
-        std2 = self.stddev.mul_(2)
-        mean = self.loc
-        return mean.sub(std2).clamp_min(self.bounds[:, 0]), mean.add(std2).clamp_max(self.bounds[:, 1])
 
     def expand(self, batch_size: torch.Size) -> TruncatedMultivariateNormal:
         r"""
@@ -201,6 +179,9 @@ class TruncatedMultivariateNormal(TruncMultivariateNormal, Distribution):
                 "set `settings.fast_computations.log_prob` to `on`."
             )
 
+
+    def rsample(self, sample_shape: torch.Size = torch.Size()) -> Tensor:
+        return TruncMultivariateNormal.rsample(self, sample_shape=sample_shape)
 
     def sample(self, sample_shape: torch.Size = torch.Size()) -> Tensor:
         r"""

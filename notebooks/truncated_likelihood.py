@@ -1,36 +1,42 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Implement Test of Multitask Multivariate Truncated Normal Likelihood
+
+# ## Imports
 import torch
 import gpytorch
 from gpytorch.likelihoods import Likelihood, MultitaskGaussianLikelihood
-from botorch.utils.probability.truncated_multivariate_normal import TruncatedMultivariateNormal
+from botorch.utils.probability.truncated_multivariate_normal import TruncatedMultivariateNormal as TruncMultivariateNormal
 from torch.distributions import constraints
 from gpytorch.constraints import GreaterThan
 from gpytorch.distributions import MultivariateNormal
 
 from matplotlib import pyplot as plt
-
-from torch_pilco.model_learning.multitask_truncated_normal_likelihood import MultitaskTruncatedNormalLikelihood
-
+from torch_pilco.model_learning.multitask_truncated_multivariate_normal import MultitaskTruncatedMultivariateNormal
+from torch_pilco.model_learning.multitask_truncated_gaussian_likelihood import MultitaskTruncatedGaussianLikelihood
+from torch_pilco.model_learning.truncated_multivariate_normal import TruncatedMultivariateNormal
 
 seed_value = 4
 torch.manual_seed(seed_value)
 
 
 # ## Build Data
-train_x = torch.linspace(0, 1, 100)[:,torch.newaxis]
+train_x = torch.linspace(0, 1, 100)[:,torch.newaxis].double()
 
-train_y = torch.hstack([
-    torch.sin(train_x * (2 * torch.pi)) + torch.randn(train_x.size()) * 0.2,
-    torch.cos(train_x * (2 * torch.pi)) + torch.randn(train_x.size()) * 0.2,
-    torch.sin(train_x * (2 * torch.pi)) + 2 * torch.cos(train_x * (2 * torch.pi)) + torch.randn(train_x.size()) * 0.2,
-    -torch.cos(train_x * (2 * torch.pi)) + torch.randn(train_x.size()) * 0.2,
-])
-
-print(train_x.shape, train_y.shape)
-
-
+def compute_y(input_x: torch.Tensor) -> torch.Tensor:
+    return torch.hstack([
+        torch.sin(input_x * (2 * torch.pi)) + torch.randn(input_x.size()) * 0.2,
+        torch.cos(input_x * (2 * torch.pi)) + torch.randn(input_x.size()) * 0.2,
+        torch.sin(input_x * (2 * torch.pi)) + 2 * torch.cos(input_x * (2 * torch.pi)) + torch.randn(input_x.size()) * 0.2,
+        -torch.cos(input_x * (2 * torch.pi)) + torch.randn(input_x.size()) * 0.2,
+    ])
+train_y = compute_y(train_x)
 num_latents = 3
 num_tasks = 4
 
+
+# ## Construct GP Model
 class MultitaskGPModel(gpytorch.models.ApproximateGP):
     def __init__(self):
         # Let's use a different set of inducing points for each latent function
@@ -71,90 +77,69 @@ class MultitaskGPModel(gpytorch.models.ApproximateGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
-model = MultitaskGPModel()
+model = MultitaskGPModel().double()
 
+
+# ## Build Likelihood
 bounds = torch.tensor([
-    [-1.5, 1.5],   # Task 1: sin
-    [-1.5, 1.5],   # Task 2: cos  
-    [-2.65, 4.5],   # Task 3: sin + 2*cos
-    [-1.7, 1.5],   # Task 4: -cos
+    [-1.25, 1.35],   # Task 1: sin
+    [-1.45, 1.25],   # Task 2: cos  
+    [-2.6, 2.5],   # Task 3: sin + 2*cos
+    [-1.7, 1.3],   # Task 4: -cos
 ])
 assert (torch.all(train_y.min(dim=0)[0] >= bounds[:, 0]) and torch.all(train_y.max(dim=0)[0] <= bounds[:, 1]))
-base_likelihood = MultitaskGaussianLikelihood(num_tasks=num_tasks)
-# Create the likelihood
-likelihood = MultitaskTruncatedNormalLikelihood(
+
+likelihood = MultitaskTruncatedGaussianLikelihood(
     num_tasks=num_tasks,
     bounds=bounds,
-)
+).double()
 
-mll = gpytorch.mlls.VariationalELBO(base_likelihood, model, num_data=train_y.size(0))
-num_epochs = 50
-
-model.train()
-base_likelihood.train()
-hyperparameter_optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
-
+output = model(train_x)
+pred_dist = likelihood(output)
+breakpoint()
+with torch.no_grad(): print(pred_dist.rsample().shape)
+# ## Construct and Optimize Marginal Likelihood 
+# Should profile this
 # Our loss object. We're using the VariationalELBO, which essentially just computes the ELBO
-#mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
+# mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
+# num_epochs = 2
 
-# We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
-# effective for VI.
-for i in range(num_epochs):
-    # Within each iteration, we will go over each minibatch of data
-    hyperparameter_optimizer.zero_grad()
-    output = model(train_x)
-    loss = -mll(output, train_y)
-    print(f'loss={loss.item()}')
-    loss.backward()
-    hyperparameter_optimizer.step()
+# model.train()
+# likelihood.train()
+# optimizer = torch.optim.Adam([
+#     {'params': model.parameters()},
+#     {'params': likelihood.parameters()},
+# ], lr=0.1)
 
-# Set into eval mode
-model.eval()
-base_likelihood.eval()
+# # We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
+# # effective for VI.
+# for i in range(num_epochs):
+#     # Within each iteration, we will go over each minibatch of data
+#     optimizer.zero_grad()
+#     output = model(train_x)
+#     loss = -mll(output, train_y)
+#     if i%10 == 0:
+#         print(f'Iteration {i}')
+#     print(f'loss={loss.item()}')
+#     loss.backward()
+#     optimizer.step()
 
-
-# ## Evaluate at Test Data
-test_x = torch.linspace(0, 1, 51)
-test_y = model(test_x)
-breakpoint()
-# predictive_dist = TruncatedMultivariateNormal(
-#     loc=test_y.mean.flatten(),
-#     covariance_matrix=test_y.covariance_matrix,
-#     bounds = torch.tile(bounds, (51,1))
-# )
-
-# mu = predictions.mean.reshape((51,4))
-# std = torch.sqrt(torch.diagonal(predictions.covariance_matrix, dim1=-2, dim2=-1)).reshape((51,4))
-
-# lower = mu - 2 * std
-# upper = mu + 2 * std
+# # Set into eval mode
+# model.eval()
+# likelihood.eval()
 
 
-breakpoint()
-# Initialize plots
-fig, axs = plt.subplots(1, num_tasks, figsize=(4 * num_tasks, 3))
+# # ## Evaluate at Test Data
+# test_x = torch.linspace(0, 1, 51)[:,torch.newaxis]
+# test_y = compute_y(test_x)
 
-# # Make predictions
-with torch.no_grad(), gpytorch.settings.fast_pred_var():
-    test_x = torch.linspace(0, 1, 51)
-    predictive_dist = likelihood(model(test_x))
-    mu = predictive_dist.mean
-    lower, upper = predictive_dist.confidence_region()
+# # # Make predictions
+# with torch.no_grad(), gpytorch.settings.fast_pred_var():
+#     predictive_dist = likelihood(model(test_x))
+#     mu = predictive_dist.mean
+#     #lower, upper = predictive_dist.confidence_region()
+#     std2 = predictive_dist.variance.sqrt().mul_(2)
+#     lower, upper = torch.max(torch.min(mu.sub(std2), bounds[:,1]), bounds[:,0]), torch.max(torch.min(mu.add(std2), bounds[:,1]), bounds[:,0])
 
-for task, ax in enumerate(axs):
-    # Plot training data as black stars
-    ax.plot(train_x.detach().numpy(), train_y[:, task].detach().numpy(), 'k*')
-    # Predictive mean as blue line
-    ax.plot(test_x.numpy(), mu[:, task].detach().numpy(), 'b')
-    # Shade in confidence
-    ax.fill_between(test_x.numpy(), lower[:, task].detach().numpy(), upper[:, task].detach().numpy(), alpha=0.5)
-    ax.axhline(bounds[task,0])
-    ax.axhline(bounds[task,1])
-    ax.set_ylim([-5, 5])
-    ax.legend(['Observed Data', 'Mean', 'Confidence'])
-    ax.set_title(f'Task {task + 1}')
-
-fig.tight_layout()
-
-plt.show()
-
+# samples = predictive_dist.rsample()
+# print(samples.shape)

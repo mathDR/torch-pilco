@@ -23,9 +23,9 @@ from gpytorch.lazy import LazyEvaluatedKernelTensor
 from torch_pilco.model_learning.multitask_truncated_multivariate_normal import MultitaskTruncatedMultivariateNormal
 
 
-class MultitaskTruncatedNormalLikelihood(Likelihood):
+class MultitaskTruncatedGaussianLikelihood(Likelihood):
     r"""
-    Multitask Truncated Normal Likellihood that allows for apriori Box Constraints on the latent outputs.
+    Multitask Truncated Gaussian Likellihood that allows for apriori Box Constraints on the latent outputs.
     for a full cross-task covariance structure for the noise. The fitted covariance matrix has rank `rank`.
     If a strictly diagonal task noise covariance matrix is desired, then rank=0 should be set. (This option still
     allows for a different `noise` parameter for each task.)

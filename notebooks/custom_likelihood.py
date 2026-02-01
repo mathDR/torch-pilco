@@ -1,3 +1,11 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Custom Likelihood
+
+# In[55]:
+
+
 import torch
 import gpytorch
 from gpytorch.likelihoods import Likelihood, MultitaskGaussianLikelihood
@@ -8,6 +16,14 @@ from gpytorch.distributions import MultivariateNormal
 
 import tqdm
 from matplotlib import pyplot as plt
+
+get_ipython().run_line_magic('matplotlib', 'inline')
+get_ipython().run_line_magic('load_ext', 'autoreload')
+get_ipython().run_line_magic('autoreload', '2')
+
+
+# In[56]:
+
 
 train_x = torch.linspace(0, 1, 100)[:,torch.newaxis]
 
@@ -71,22 +87,33 @@ model = MultitaskGPModel()
 base_likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=num_tasks)
 
 
+# In[58]:
+
+
+torch.tile(torch.tensor(1e-4), (4,)).shape
+
+
+# In[67]:
+
+
 class MultivariateTruncatedNormalLikelihood(Likelihood):
     """
     A custom likelihood for multivariate truncated normal distributions that
     uses botorch's TruncatedMultivariateNormal.
     """
-   
+
     def __init__(
         self,
         num_tasks: int,
+        rank: int=0,
         truncation_bounds: torch.Tensor=None,
-        prior_noise: float=1e-4,
+        noise_constraint: float | None=None,
+        batch_shape: torch.Size = torch.Size([]),
         **kwargs
     ) -> None:
         """
         Initialize the likelihood with truncation bounds.
-       
+
         Args:
             num_tasks: Number of tasks/outputs
             rank: 
@@ -97,61 +124,63 @@ class MultivariateTruncatedNormalLikelihood(Likelihood):
         super().__init__()
 
         self.num_tasks = num_tasks
-        
-        self.noise_covar = torch.diag_embed(prior_noise, batch_shape=torch.Size([num_tasks]))
-        self.register_parameter(name="noise_diag", parameter=torch.nn.Paramter(torch.ones(num_tasks)))
-        
-        self.register_constraint("noise_diag", self.noise_covar)
-       
+        self.rank = rank
+
+        if noise_constraint is None:
+            noise_constraint = GreaterThan(1e-4)
+
+        self.register_parameter(name="raw_noise", parameter=torch.nn.Parameter(torch.zeros(*batch_shape, 1)))
+        self.register_constraint("raw_noise", noise_constraint)
+
         # Store truncation bounds
         self.truncation_bounds = truncation_bounds
-       
+
         # Validate truncation bounds
         if truncation_bounds is not None:
             # Should assert second dimension is shape 2
             if not (truncation_bounds[:,0] <= truncation_bounds[:,1]).all():
                 raise ValueError("Lower bounds must be less than or equal to upper bounds")
-   
+
     @property
     def noise(self) -> torch.Tensor:
-        return self.raw_noise_constraint.transform(self.noise_covar)
-    
-    def forward(self, function_samples, **kwargs):
+        return self.raw_noise_constraint.transform(self.raw_noise)
+
+    def forward(self, function_samples, targets=None, **kwargs):
         """
         Forward pass to compute the likelihood.
-       
+
         Args:
             function_samples: Tensor of function samples [batch_size, num_tasks]
             targets: Target values [batch_size, num_tasks]
-           
+
         Returns:
             Distribution object representing the likelihood
         """
         mean = function_samples
-        
+
         # Add observational noise to the diagonal
         # This creates the covariance matrix for the Truncated MVN
         num_samples = mean.size(-1)
         covar = torch.eye(num_samples).to(mean) * self.noise
-        
+
         return TruncatedMultivariateNormal(
             loc=mean,
             covariance_matrix=covar,
             bounds=self.truncation_bounds,
         )
-   
+
     def expected_log_prob(self, observations, function_dist, *args, **kwargs):
         """
         Compute the expected log probability of observations under the likelihood.
-       
+
         Args:
             observations: Observed values [batch_size, num_tasks]
             function_dist: Distribution of function values
-           
+
         Returns:
             Expected log probability
         """
-       
+
         if self.truncation_bounds is not None:
             truncated_dist = TruncatedMultivariateNormal(
                 loc=function_dist.mean,
@@ -160,8 +189,6 @@ class MultivariateTruncatedNormalLikelihood(Likelihood):
             )
         else:
             truncated_dist = function_dist
-
-        breakpoint()
 
         # Compute log probability
         log_prob = truncated_dist.log_prob(observations)
@@ -173,18 +200,18 @@ class MultivariateTruncatedNormalLikelihood(Likelihood):
 #     num_tasks = 3
 #     lower_bounds = torch.tensor([-1.0, -2.0, -1.5])
 #     upper_bounds = torch.tensor([2.0, 3.0, 2.5])
-   
+
 #     likelihood = MultivariateTruncatedNormalLikelihood(
 #         num_tasks=num_tasks,
 #         truncation_lower=lower_bounds,
 #         truncation_upper=upper_bounds
 #     )
-   
+
 #     print("Custom Multivariate Truncated Normal Likelihood created successfully!")
 #     print(f"Number of tasks: {num_tasks}")
 #     print(f"Lower bounds: {lower_bounds}")
 #     print(f"Upper bounds: {upper_bounds}")
-       
+
 
 
 # In[68]:
@@ -209,7 +236,7 @@ likelihood = MultivariateTruncatedNormalLikelihood(
 # In[70]:
 
 
-print(likelihood(model(train_x)), base_likelihood(model(train_x)).rsample().shape)
+likelihood(model(train_x)), base_likelihood(model(train_x)).rsample().shape
 
 
 # In[71]:
@@ -231,6 +258,18 @@ print(output.__class__.__name__, output.event_shape)
 # In[73]:
 
 
+likelihood.num_tasks
+
+
+# In[74]:
+
+
+train_y.shape, model(train_x).shape
+
+
+# In[75]:
+
+
 # Our loss object. We're using the VariationalELBO, which essentially just computes the ELBO
 base_mll = gpytorch.mlls.VariationalELBO(base_likelihood, model, num_data=train_y.size(0))
 
@@ -238,7 +277,7 @@ base_mll = gpytorch.mlls.VariationalELBO(base_likelihood, model, num_data=train_
 # In[76]:
 
 
-print(-base_mll(model(train_x), train_y))
+-base_mll(model(train_x), train_y)
 
 
 # In[77]:
@@ -249,8 +288,23 @@ mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=train_y.size(0))
 
 # In[78]:
 
-breakpoint()
+
+model(train_x).loc.shape, model(train_x).covariance_matrix.shape
+
+
+# In[ ]:
+
+
+
+
+
+# In[79]:
+
+
 -mll(model(train_x), train_y)
+
+
+# In[12]:
 
 
 # this is for running the notebook in our testing framework
@@ -266,48 +320,60 @@ optimizer = torch.optim.Adam([
     {'params': likelihood.parameters()},
 ], lr=0.1)
 
+
+
 # We use more CG iterations here because the preconditioner introduced in the NeurIPS paper seems to be less
 # effective for VI.
-with gpytorch.settings.num_likelihood_samples(15):
-    epochs_iter = tqdm.tqdm_notebook(range(num_epochs), desc="Epoch")
-    for i in epochs_iter:
-        # Within each iteration, we will go over each minibatch of data
-        optimizer.zero_grad()
-        output = model(train_x)
-        loss = -base_mll(output, train_y)
-        epochs_iter.set_postfix(loss=loss.item())
-        loss.backward()
-        optimizer.step()
-
-# # Set into eval mode
-# model.eval()
-# likelihood.eval()
-
-# # Initialize plots
-# fig, axs = plt.subplots(1, num_tasks, figsize=(4 * num_tasks, 3))
-
-# # Make predictions
-# with torch.no_grad(), gpytorch.settings.fast_pred_var():
-#     test_x = torch.linspace(0, 1, 51)
-#     predictions = likelihood(model(test_x))
-#     mean = predictions.mean
-#     lower, upper = predictions.confidence_region()
-
-# for task, ax in enumerate(axs):
-#     # Plot training data as black stars
-#     ax.plot(train_x.detach().numpy(), train_y[:, task].detach().numpy(), 'k*')
-#     # Predictive mean as blue line
-#     ax.plot(test_x.numpy(), mean[:, task].numpy(), 'b')
-#     # Shade in confidence
-#     ax.fill_between(test_x.numpy(), lower[:, task].numpy(), upper[:, task].numpy(), alpha=0.5)
-#     ax.set_ylim([-3, 3])
-#     ax.legend(['Observed Data', 'Mean', 'Confidence'])
-#     ax.set_title(f'Task {task + 1}')
-
-# fig.tight_layout()
-# None
+epochs_iter = tqdm.tqdm_notebook(range(num_epochs), desc="Epoch")
+for i in epochs_iter:
+    # Within each iteration, we will go over each minibatch of data
+    optimizer.zero_grad()
+    output = model(train_x)
+    loss = -base_mll(output, train_y)
+    epochs_iter.set_postfix(loss=loss.item())
+    loss.backward()
+    optimizer.step()
 
 
+# In[ ]:
+
+
+
+
+
+# In[9]:
+
+
+# Set into eval mode
+model.eval()
+likelihood.eval()
+
+# Initialize plots
+fig, axs = plt.subplots(1, num_tasks, figsize=(4 * num_tasks, 3))
+
+# Make predictions
+with torch.no_grad(), gpytorch.settings.fast_pred_var():
+    test_x = torch.linspace(0, 1, 51)
+    predictions = likelihood(model(test_x))
+    mean = predictions.mean
+    lower, upper = predictions.confidence_region()
+
+for task, ax in enumerate(axs):
+    # Plot training data as black stars
+    ax.plot(train_x.detach().numpy(), train_y[:, task].detach().numpy(), 'k*')
+    # Predictive mean as blue line
+    ax.plot(test_x.numpy(), mean[:, task].numpy(), 'b')
+    # Shade in confidence
+    ax.fill_between(test_x.numpy(), lower[:, task].numpy(), upper[:, task].numpy(), alpha=0.5)
+    ax.set_ylim([-3, 3])
+    ax.legend(['Observed Data', 'Mean', 'Confidence'])
+    ax.set_title(f'Task {task + 1}')
+
+fig.tight_layout()
+None
+
+
+# In[ ]:
 
 
 
