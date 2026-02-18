@@ -54,12 +54,15 @@ class GPyTorchEnv(EnvBase):
         observation_spec = UnboundedContinuous(
             shape=torch.Size([self.batch_size[0], self.state_size])
         ) # unlimited observation space
+        
         # Observation spec should be same and batch_size per https://github.com/pytorch/rl/issues/1766
         self.observation_spec = Composite(
             observation=observation_spec,
             shape=self.batch_size,
         ) # has to be CompositeSpec per the docs
+        
         self.state_spec = self.observation_spec.clone()
+        
         self.reward_spec = UnboundedContinuous(
             shape=torch.Size([self.batch_size[0], 1]),
             dtype=torch.float32,

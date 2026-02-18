@@ -86,7 +86,7 @@ def main():
     replay_buffer = ReplayBuffer(storage=LazyTensorStorage(10000))
 
     # Generate a random trajectory from the environment
-    collector = SyncDataCollector(
+    true_env_collector = SyncDataCollector(
         env,
         policy=random_policy,
         total_frames=total_frames,
@@ -101,8 +101,8 @@ def main():
 
     for _ in range(num_pilco_training_loops):
         # Put the data into the replay buffer
-        for data in collector:
-            # convert the tensordict from collector to a version
+        for data in true_env_collector:
+            # convert the tensordict from true_env_collector to a version
             # suitable for dynamical model
             replay_buffer.extend(data)
 
@@ -187,7 +187,7 @@ def main():
             scheduler.step()
         env.reset()
         # Now sample from true environment with optimized policy
-        collector = SyncDataCollector(
+        true_env_collector = SyncDataCollector(
             env,
             policy=policy,
             frames_per_batch=frames_per_batch,
