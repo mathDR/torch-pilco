@@ -171,8 +171,8 @@ def main():
         model.double().to(device)
         print("Fitting GP Surrogate model.")
         ExactFit(model)
+        # Should save this model and load it for testing...
         print("GP Surrogate model fit.")
-        breakpoint()
 
         gp_env = GPyTorchEnv(
             model,
@@ -183,7 +183,7 @@ def main():
             pendulum_cost,
             environment_replay_buffer,
             device=device,
-            batch_size=(num_particles,)
+            batch_size=(surrogate_frames_per_batch,)
         )
         print(check_env_specs(gp_env))
 
