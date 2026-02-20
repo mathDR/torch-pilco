@@ -24,7 +24,7 @@ class DynamicalModel(torch.nn.Module):
         """Transforms data into PILCO data format."""
         val = states
         if val.ndim == 1:
-            val = torch.atleast_2d(val).T
+            val = torch.atleast_2d(val)
         return val[1:,:]
 
     def data_to_gp_input(
@@ -35,7 +35,7 @@ class DynamicalModel(torch.nn.Module):
         """Transforms data into PILCO data format."""
         val = torch.hstack((states, actions))
         if val.ndim == 1:
-            val = torch.atleast_2d(val).T
+            val = torch.atleast_2d(val)
         return val
 
     def data_to_gp_input_output(
@@ -53,6 +53,59 @@ class DynamicalModel(torch.nn.Module):
                 states,
             ),
         )
+
+
+class RewardModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel):
+    training_data: torch.Tensor
+    training_outputs: torch.Tensor
+    state_dim: int
+    input_dimension: int
+    likelihood: gpytorch.likelihoods.GaussianLikelihood
+
+    mean_module: gpytorch.means.Mean
+    covar_module: gpytorch.kernels.Kernel
+
+    def __init__(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        likelihood: gpytorch.likelihoods.GaussianLikelihood,
+        device: torch.device=torch.device("cpu"),
+        dtype: torch.dtype=torch.float,
+    ):
+
+        self.training_data = self.data_to_gp_input(
+            states, actions
+        )
+        self.training_outputs = rewards.squeeze(1)
+
+        self.input_dimension = self.training_data.shape[1]
+        self.state_dim = states.shape[1]
+
+        self._num_outputs = 1
+        super().__init__(self.training_data, self.training_outputs, likelihood)
+
+        self.likelihood = likelihood
+
+        self.mean_module = gpytorch.means.ConstantMean()
+        # self.covar_module = gpytorch.kernels.SpectralMixtureKernel(
+        #     num_mixtures=4,
+        #     ard_num_dims=self.input_dimension
+        # )
+        # self.covar_module.initialize_from_data(self.training_data, self.training_outputs)
+        self.covar_module = gpytorch.kernels.MaternKernel(nu=1.5, ard_num_dims=self.input_dimension)
+
+
+    def forward(self, x: torch.Tensor):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+    def sample(self, x: torch.Tensor, num_samples: int=1) -> torch.Tensor:
+        # Samples from the GP
+        samples = self(x).rsample(torch.Size([num_samples]))
+        return samples
 
 
 class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel):
@@ -86,6 +139,8 @@ class ExactDynamicalModel(DynamicalModel, gpytorch.models.ExactGP, GPyTorchModel
         states: torch.Tensor,
         actions: torch.Tensor,
         likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
+        device: torch.device=torch.device("cpu"),
+        dtype: torch.dtype=torch.float,
     ):
 
         self.training_data, self.training_outputs = self.data_to_gp_input_output(
@@ -160,6 +215,8 @@ class ApproximateDynamicalModel(DynamicalModel, gpytorch.models.ApproximateGP, G
         likelihood: gpytorch.likelihoods.MultitaskGaussianLikelihood,
         *,
         num_inducing_points: int,
+        device: torch.device=torch.device("cpu"),
+        dtype: torch.dtype=torch.float,
     ):
 
         num_latents = states.shape[1]
@@ -222,20 +279,7 @@ def ExactFit(
     # "Loss" for GPs - the marginal log likelihood
     mll = gpytorch.mlls.ExactMarginalLogLikelihood(model.likelihood, model)
     fit_gpytorch_mll(mll)
-    # num_epochs = 250
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
 
-    # for i in range(num_epochs):
-    #     # Within each iteration, we will go over each minibatch of data
-    #     #variational_ngd_optimizer.zero_grad()
-    #     #hyperparameter_optimizer.zero_grad()
-    #     optimizer.zero_grad()
-    #     output = model(model.training_data)
-    #     loss = -mll(output, model.training_outputs)
-    #     loss.backward()
-    #     #variational_ngd_optimizer.step()
-    #     #hyperparameter_optimizer.step()
-    #     optimizer.step()
     # Set model to evaluation mode
     model.eval()
 

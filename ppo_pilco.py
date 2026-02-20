@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from tensordict.nn.distributions import NormalParamExtractor
 
-from torchrl.collectors import SyncDataCollector
+from torchrl.collectors import Collector
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModule
 from torchrl.envs import (
@@ -39,18 +39,28 @@ from torch_pilco.model_learning.dynamical_models import (
     ApproximateFit,
     ExactDynamicalModel,
     ExactFit,
+    RewardModel,
 )
 from torch_pilco.rewards import pendulum_cost
 from torch_pilco.policy_learning.rollout import GPyTorchEnv
 
 def build_pendulum_training_data(
     data_tensordict: TensorDict,
- ) -> tuple[torch.Tensor, torch.Tensor]:
-    return data_tensordict['observation'].float(), data_tensordict['action'].float()
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return (
+        data_tensordict["observation"].float(),
+        data_tensordict["action"].float(),
+        data_tensordict["next"]["reward"].float(),
+    )
 
 
 def main():
-    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        print("GPU is available. Using GPU backend.")
+        device = torch.device("cuda:0")
+    else:
+        print("GPU not available. Falling back to CPU.")
+        device = torch.device("cpu")
 
     num_cells = 256  # number of cells in each layer i.e. output dim.
     lr = 3e-4
@@ -61,7 +71,7 @@ def main():
     total_frames = 7*frames_per_batch
 
     # Surrogate Data Collection
-    surrogate_frames_per_batch = 1000
+    surrogate_frames_per_batch = 100
     # For a complete training, bring the number of frames up to 1M
     surrogate_total_frames = 10_000
 
@@ -75,7 +85,7 @@ def main():
     lmbda = 0.95
     entropy_eps = 1e-4
 
-    #base_env = GymEnv("InvertedDoublePendulum-v4", device=device)
+    #base_env = GymEnv("InvertedDoublePendulum-v5", device=device)
     base_env = GymEnv("InvertedPendulum-v5", device=device)
     env = TransformedEnv(
         base_env,
@@ -110,42 +120,12 @@ def main():
     environment_replay_buffer = ReplayBuffer(storage=LazyTensorStorage(10000))
 
     # Generate a random trajectory from the environment
-    true_env_collector = SyncDataCollector(
+    true_env_collector = Collector(
         env,
         policy=random_policy,
         total_frames=total_frames,
         frames_per_batch=frames_per_batch,
         reset_at_each_iter=True,
-    )
-
-    # Policy
-    actor_net = nn.Sequential(
-        nn.LazyLinear(num_cells, device=device),
-        nn.Tanh(),
-        nn.LazyLinear(num_cells, device=device),
-        nn.Tanh(),
-        nn.LazyLinear(num_cells, device=device),
-        nn.Tanh(),
-        nn.LazyLinear(2 * env.action_spec.shape[-1], device=device),
-        NormalParamExtractor(),
-    )
-    policy_tensordict_module = TensorDictModule(
-        actor_net, in_keys=["observation"], out_keys=["loc", "scale"]
-    )
-
-    value_net = nn.Sequential(
-        nn.LazyLinear(num_cells, device=device),
-        nn.Tanh(),
-        nn.LazyLinear(num_cells, device=device),
-        nn.Tanh(),
-        nn.LazyLinear(num_cells, device=device),
-        nn.Tanh(),
-        nn.LazyLinear(1, device=device),
-    )
-
-    value_module = ValueOperator(
-        module=value_net,
-        in_keys=["observation"],
     )
 
     for pilco_iteration in range(num_pilco_training_loops):
@@ -157,34 +137,46 @@ def main():
 
         # Now grab some data and fit the GP
         # Use the whole buffer for data
-        states, actions = build_pendulum_training_data(environment_replay_buffer.sample(len(environment_replay_buffer)))
-        states = states.reshape(-1,state_dim).to(device)
-        actions = actions.reshape(-1,action_dim).to(device)
+        all_data = environment_replay_buffer.sample(len(environment_replay_buffer)).to(device)
 
-        likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+        states, actions, rewards = build_pendulum_training_data(all_data)
+        states = states.reshape(-1, state_dim).to(device)
+        actions = actions.reshape(-1, action_dim).to(device)
+
+        breakpoint()
+
+        surrogate_likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
            num_tasks=states.shape[1]
         ).double().to(device)
-        model = ExactDynamicalModel(
+        reward_likelihood = gpytorch.likelihoods.GaussianLikelihood().double().to(device)
+
+        surrogate_model = ExactDynamicalModel(
             states,
             actions,
-            likelihood,
+            surrogate_likelihood,
         )
-        model.double().to(device)
-        print("Fitting GP Surrogate model.")
-        ExactFit(model)
-        # Should save this model and load it for testing...
-        print("GP Surrogate model fit.")
-        breakpoint()
-        torch.save(model.state_dict(), f'gp_model_weights_{pilco_iteration}.pth')
-        breakpoint()
+        reward_model = RewardModel(states, actions, rewards, reward_likelihood)
+        if True:
+            surrogate_model.double().to(device)
+            print("Fitting GP Surrogate model.")
+            ExactFit(surrogate_model)
+            # Should save this model and load it for testing...
+            print("GP Surrogate model fit.")
+            torch.save(surrogate_model.state_dict(), f'gp_model_weights_{pilco_iteration}.pth')
+        else:
+            surrogate_model.load_state_dict(torch.load(f'gp_model_weights_{pilco_iteration}.pth', weights_only=True))
+            surrogate_model.double().to(device)
+            surrogate_model.eval()
+        reward_model.double().to(device)
+        ExactFit(reward_model)
 
         base_gp_env = GPyTorchEnv(
-            model,
+            surrogate_model,
             state_dim,
             action_dim,
             env.action_space.low,
             env.action_space.high,
-            pendulum_cost,
+            reward_model,
             environment_replay_buffer,
             device=device,
             batch_size=(surrogate_frames_per_batch,)
@@ -196,6 +188,36 @@ def main():
             ),
         )
         print(check_env_specs(gp_env))
+
+        # Policy
+        actor_net = nn.Sequential(
+            nn.LazyLinear(num_cells, device=device),
+            nn.Tanh(),
+            nn.LazyLinear(num_cells, device=device),
+            nn.Tanh(),
+            nn.LazyLinear(num_cells, device=device),
+            nn.Tanh(),
+            nn.LazyLinear(2 * env.action_spec.shape[-1], device=device),
+            NormalParamExtractor(),
+        )
+        policy_tensordict_module = TensorDictModule(
+            actor_net, in_keys=["observation"], out_keys=["loc", "scale"]
+        )
+
+        value_net = nn.Sequential(
+            nn.LazyLinear(num_cells, device=device),
+            nn.Tanh(),
+            nn.LazyLinear(num_cells, device=device),
+            nn.Tanh(),
+            nn.LazyLinear(num_cells, device=device),
+            nn.Tanh(),
+            nn.LazyLinear(1, device=device),
+        )
+
+        value_module = ValueOperator(
+            module=value_net,
+            in_keys=["observation"],
+        )
 
         policy_module = ProbabilisticActor(
             module=policy_tensordict_module,
@@ -210,7 +232,10 @@ def main():
             # we'll need the log-prob for the numerator of the importance weights
         )
 
-        surrogate_collector = SyncDataCollector(
+        print("Running policy:", policy_module(env.reset()))
+        print("Running value:", value_module(env.reset()))
+
+        surrogate_collector = Collector(
             gp_env,
             policy_module,
             frames_per_batch=surrogate_frames_per_batch,
@@ -243,11 +268,6 @@ def main():
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optim, total_frames // frames_per_batch, 0.0
         )
-
-        if num_pilco_training_loops == 0:
-            N = 2_000
-        else:
-            N = 4_000
 
         logs = defaultdict(list)
         pbar = tqdm(total=total_frames)
@@ -294,12 +314,12 @@ def main():
                 # We evaluate the policy once every 10 batches of data.
                 # Evaluation is rather simple: execute the policy without exploration
                 # (take the expected value of the action distribution) for a given
-                # number of steps (1000, which is our ``env`` horizon).
+                # number of steps (100, which is our ``env`` horizon).
                 # The ``rollout`` method of the ``env`` can take a policy as argument:
                 # it will then execute this policy at each step.
                 with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
                     # execute a rollout with the trained policy
-                    eval_rollout = gp_env.rollout(1000, policy_module)
+                    eval_rollout = gp_env.rollout(100, policy_module)
                     logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
                     logs["eval reward (sum)"].append(
                         eval_rollout["next", "reward"].sum().item()
@@ -311,14 +331,15 @@ def main():
                         f"eval step-count: {logs['eval step_count'][-1]}"
                     )
                     del eval_rollout
-            pbar.set_description(", ".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
+            pbar.set_description(", ".join([eval_str, cum_reward_str, lr_str, ]))#stepcount_str, lr_str]))
 
             # We're also using a learning rate scheduler. Like the gradient clipping,
             # this is a nice-to-have but nothing necessary for PPO to work.
             scheduler.step()
+        breakpoint()
         
         # Now sample from true environment with optimized policy
-        true_env_collector = SyncDataCollector(
+        true_env_collector = Collector(
             env,
             policy=policy_module,
             frames_per_batch=frames_per_batch,

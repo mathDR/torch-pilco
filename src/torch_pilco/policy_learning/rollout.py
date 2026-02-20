@@ -12,14 +12,17 @@ from torchrl.data import (
     ReplayBuffer,
 )
 from typing import Callable
-from torch_pilco.model_learning.dynamical_models import ExactDynamicalModel
+from torch_pilco.model_learning.dynamical_models import (
+    ExactDynamicalModel,
+    ApproximateDynamicalModel,
+)
 
 
 class GPyTorchEnv(EnvBase):
     # Wraps an existing GPyTorch model as a TorchRL environment
     def __init__( 
         self,
-        trained_model: ExactDynamicalModel,
+        trained_model: ExactDynamicalModel | ApproximateDynamicalModel,
         state_size: int,
         action_size: int,
         action_space_low: float,
@@ -27,6 +30,7 @@ class GPyTorchEnv(EnvBase):
         reward_func: Callable[[torch.Tensor, torch.Tensor], Union[torch.float32, torch.float64]],
         replay_buffer: ReplayBuffer,
         device: torch.device=torch.device("cpu"),
+        dtype: torch.dtype=torch.float,
         batch_size: tuple | torch.Size | None = None,
     ) -> None:
         super(GPyTorchEnv, self).__init__(batch_size=batch_size)
@@ -38,52 +42,70 @@ class GPyTorchEnv(EnvBase):
         self.replay_buffer = replay_buffer
 
         self.device = device
+        self.dtype = dtype
 
         self.state_size = state_size
         assert self.state_size == self.gp_model.num_outputs, "Number of GP outputs needs to match true environment state."
         self.action_size = action_size
-        
+        self.step_count = torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
+        self._set_specs(action_space_low, action_space_high)
+
+    def _set_specs(self, action_space_low: float, action_space_high: float) -> None:
         # specs
         self.action_spec = BoundedContinuous(
-            low=torch.tile(torch.from_numpy(action_space_low),(self.batch_size[0],self.action_size)),
-            high=torch.tile(torch.from_numpy(action_space_high),(self.batch_size[0],self.action_size)),
+            low=torch.tile(torch.from_numpy(action_space_low), (self.batch_size[0], self.action_size)),
+            high=torch.tile(torch.from_numpy(action_space_high), (self.batch_size[0], self.action_size)),
             device=self.device,
-            dtype=torch.float32,
+            dtype=self.dtype,
         )
 
         observation_spec = UnboundedContinuous(
-            shape=torch.Size([self.batch_size[0], self.state_size])
+            shape=torch.Size([self.batch_size[0], self.state_size]),
+            device=self.device,
+            dtype=self.dtype,
         ) # unlimited observation space
-        
+
         # Observation spec should be same and batch_size per https://github.com/pytorch/rl/issues/1766
         self.observation_spec = Composite(
             observation=observation_spec,
             shape=self.batch_size,
         ) # has to be CompositeSpec per the docs
-        
+
         self.state_spec = self.observation_spec.clone()
-        
+
         self.reward_spec = UnboundedContinuous(
             shape=torch.Size([self.batch_size[0], 1]),
-            dtype=torch.float32,
-        ) # unlimited reward space(even though we could limit it to (-17, 0] for the pendulum)
+            device=self.device,
+            dtype=self.dtype,
+        ) # unlimited reward space
 
     def gen_states(self, batch_size: int) -> None:
         # init new state from the replay buffer
-        replay_buffer_sample = self.replay_buffer.sample(batch_size)
-        self.state = replay_buffer_sample["observation"][:,0,:].reshape(self.batch_size[0],self.state_size).float()
+        replay_buffer_sample = self.replay_buffer.sample(batch_size).to(self.device)
+        self.state = replay_buffer_sample["observation"].reshape(self.batch_size[0],self.state_size).float()
     
     def _reset(self, tensordict: TensorDict | None = None):
+        self.step_count = torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
+
         if tensordict is None or tensordict.is_empty():
             # if no ``tensordict`` is passed, we generate a single state based on the replay_buffer
             # Otherwise, we assume that the input ``tensordict`` contains all the relevant
             # parameters to get started.
             self.gen_states(batch_size=self.batch_size[0])
         else:
+            breakpoint()
             self.state = tensordict["observation"].reshape(self.batch_size[0], self.state_size).float()
         
-        out_tensordict = TensorDict({}, batch_size=self.batch_size)
-        out_tensordict.set("observation", self.state)
+        out_tensordict = TensorDict(
+            {
+                "observation": self.state,
+                "step_count": self.step_count,
+                "truncated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+                "done": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+                "terminated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+            },
+            batch_size=self.batch_size
+        )
 
         return out_tensordict
 
@@ -91,6 +113,7 @@ class GPyTorchEnv(EnvBase):
         self,
         tensordict: TensorDict
     ) -> TensorDict:
+        self.step_count += 1
         action = tensordict["action"]
         action = action.reshape((self.batch_size[0], self.action_size))
 
@@ -104,13 +127,16 @@ class GPyTorchEnv(EnvBase):
                 self.state = torch.cat(
                     [self.gp_model.likelihood(self.gp_model(mi)).rsample() for mi in model_input]
                 ).float()
-
-        reward = torch.vmap(self.reward_func, in_dims=(0,0))(self.state, action)
+            reward = torch.cat([self.reward_func(mi).sample() for mi in model_input]).float()
 
         out_tensordict = TensorDict(
             {
                 "observation": self.state,
                 "reward": reward,
+                "step_count": self.step_count,
+                "truncated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+                "done": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+                "terminated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
             },
             batch_size=self.batch_size
         )
