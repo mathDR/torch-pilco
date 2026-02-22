@@ -28,21 +28,20 @@ class GPyTorchEnv(EnvBase):
         action_space_low: float,
         action_space_high: float,
         reward_func: Callable[[torch.Tensor, torch.Tensor], Union[torch.float32, torch.float64]],
-        replay_buffer: ReplayBuffer,
         device: torch.device=torch.device("cpu"),
         dtype: torch.dtype=torch.float,
         batch_size: tuple | torch.Size | None = None,
+        **kwargs,
     ) -> None:
-        super(GPyTorchEnv, self).__init__(batch_size=batch_size)
+        super(GPyTorchEnv, self).__init__(batch_size=batch_size, **kwargs)
+        
+        self.device = device
+        self.dtype = dtype
         
         # custom property intialization - unique to this environment
         self.gp_model = trained_model.to(device)
         self.gp_model.eval() # Set model to evaluation mode
         self.reward_func = reward_func # can we populate this with the env.reward function?
-        self.replay_buffer = replay_buffer
-
-        self.device = device
-        self.dtype = dtype
 
         self.state_size = state_size
         assert self.state_size == self.gp_model.num_outputs, "Number of GP outputs needs to match true environment state."
@@ -79,30 +78,30 @@ class GPyTorchEnv(EnvBase):
             dtype=self.dtype,
         ) # unlimited reward space
 
-    def gen_states(self, batch_size: int) -> None:
+    def gen_states(self, sample_size: int) -> None:
         # init new state from the replay buffer
-        replay_buffer_sample = self.replay_buffer.sample(batch_size).to(self.device)
-        self.state = replay_buffer_sample["observation"].reshape(self.batch_size[0],self.state_size).float()
+        self.state = self.gp_model.training_outputs[
+            torch.randperm(sample_size)
+        ].reshape(self.batch_size[0], self.state_size).float()
     
     def _reset(self, tensordict: TensorDict | None = None):
         self.step_count = torch.zeros(self.batch_size, dtype=torch.long, device=self.device)
 
         if tensordict is None or tensordict.is_empty():
-            # if no ``tensordict`` is passed, we generate a single state based on the replay_buffer
+            # if no ``tensordict`` is passed, we generate a single state based on the gaussian process training data
             # Otherwise, we assume that the input ``tensordict`` contains all the relevant
             # parameters to get started.
-            self.gen_states(batch_size=self.batch_size[0])
+            self.gen_states(sample_size=self.batch_size[0])
         else:
-            breakpoint()
             self.state = tensordict["observation"].reshape(self.batch_size[0], self.state_size).float()
         
         out_tensordict = TensorDict(
             {
                 "observation": self.state,
                 "step_count": self.step_count,
-                "truncated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
-                "done": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
-                "terminated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+                "truncated": torch.zeros((*self.batch_size, 1), dtype=torch.bool).to(self.device),
+                "done": torch.zeros((*self.batch_size, 1), dtype=torch.bool).to(self.device),
+                "terminated": torch.zeros((*self.batch_size, 1), dtype=torch.bool).to(self.device),
             },
             batch_size=self.batch_size
         )
@@ -134,9 +133,9 @@ class GPyTorchEnv(EnvBase):
                 "observation": self.state,
                 "reward": reward,
                 "step_count": self.step_count,
-                "truncated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
-                "done": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
-                "terminated": torch.zeros((*self.batch_size, 1), dtype=torch.bool),
+                "truncated": torch.zeros((*self.batch_size, 1), dtype=torch.bool).to(self.device),
+                "done": torch.zeros((*self.batch_size, 1), dtype=torch.bool).to(self.device),
+                "terminated": torch.zeros((*self.batch_size, 1), dtype=torch.bool).to(self.device),
             },
             batch_size=self.batch_size
         )

@@ -41,7 +41,6 @@ from torch_pilco.model_learning.dynamical_models import (
     ExactFit,
     RewardModel,
 )
-from torch_pilco.rewards import pendulum_cost
 from torch_pilco.policy_learning.rollout import GPyTorchEnv
 
 def build_pendulum_training_data(
@@ -63,7 +62,7 @@ def main():
         device = torch.device("cpu")
 
     num_cells = 256  # number of cells in each layer i.e. output dim.
-    lr = 3e-4
+    lr = 1e-4
     max_grad_norm = 1.0
 
     # Environmental Data Collection
@@ -79,30 +78,31 @@ def main():
     sub_batch_size = 64  # cardinality of the sub-samples gathered from the current data in the inner loop
     num_epochs = 10  # optimization steps per batch of data collected
     clip_epsilon = (
-        0.2  # clip value for PPO loss: see the equation in the intro for more context.
+        0.1  # clip value for PPO loss
     )
     gamma = 0.99
     lmbda = 0.95
     entropy_eps = 1e-4
 
-    #base_env = GymEnv("InvertedDoublePendulum-v5", device=device)
-    base_env = GymEnv("InvertedPendulum-v5", device=device)
+    #base_env = GymEnv("InvertedDoublePendulum-v5", healthy_reward = 0, device=device)
+    #base_env  GymEnv("InvertedPendulum-v5", device=device)
+    base_env = GymEnv("Pendulum-v1", device=device)
     env = TransformedEnv(
         base_env,
         Compose(
             # normalize observations
-            ObservationNorm(in_keys=["observation"]),
+            #ObservationNorm(in_keys=["observation"]),
             DoubleToFloat(),
             StepCounter(),
         ),
     )
     
-    env.transform[0].init_stats(num_iter=1000, reduce_dim=0, cat_dim=0)
-    print("normalization constant shape:", env.transform[0].loc.shape)
-    print("observation_spec:", env.observation_spec)
-    print("reward_spec:", env.reward_spec)
-    print("input_spec:", env.input_spec)
-    print("action_spec (as defined by input_spec):", env.action_spec)
+    #env.transform[0].init_stats(num_iter=1000, reduce_dim=0, cat_dim=0)
+    # print("normalization constant shape:", env.transform[0].loc.shape)
+    # print("observation_spec:", env.observation_spec)
+    # print("reward_spec:", env.reward_spec)
+    # print("input_spec:", env.input_spec)
+    # print("action_spec (as defined by input_spec):", env.action_spec)
     print(check_env_specs(env))
 
     rollout = env.rollout(3)
@@ -117,7 +117,10 @@ def main():
     num_pilco_training_loops = 5
 
     # Store each interaction with the environment
-    environment_replay_buffer = ReplayBuffer(storage=LazyTensorStorage(10000))
+    environment_replay_buffer = ReplayBuffer(
+        storage=LazyTensorStorage(10000),
+        sampler=SamplerWithoutReplacement(),
+    )
 
     # Generate a random trajectory from the environment
     true_env_collector = Collector(
@@ -142,8 +145,6 @@ def main():
         states, actions, rewards = build_pendulum_training_data(all_data)
         states = states.reshape(-1, state_dim).to(device)
         actions = actions.reshape(-1, action_dim).to(device)
-
-        breakpoint()
 
         surrogate_likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
            num_tasks=states.shape[1]
@@ -177,16 +178,15 @@ def main():
             env.action_space.low,
             env.action_space.high,
             reward_model,
-            environment_replay_buffer,
-            device=device,
-            batch_size=(surrogate_frames_per_batch,)
+            batch_size=(surrogate_frames_per_batch,),
+            auto_reset=True,
         )
         gp_env = TransformedEnv(
             base_gp_env,
             Compose(
                 StepCounter(max_steps=100),
             ),
-        )
+        ).to(device)
         print(check_env_specs(gp_env))
 
         # Policy
@@ -197,7 +197,7 @@ def main():
             nn.Tanh(),
             nn.LazyLinear(num_cells, device=device),
             nn.Tanh(),
-            nn.LazyLinear(2 * env.action_spec.shape[-1], device=device),
+            nn.LazyLinear(2 * gp_env.action_spec.shape[-1], device=device),
             NormalParamExtractor(),
         )
         policy_tensordict_module = TensorDictModule(
@@ -232,15 +232,14 @@ def main():
             # we'll need the log-prob for the numerator of the importance weights
         )
 
-        print("Running policy:", policy_module(env.reset()))
-        print("Running value:", value_module(env.reset()))
+        print("Running policy:", policy_module(gp_env.reset()))
+        print("Running value:", value_module(gp_env.reset()))
 
         surrogate_collector = Collector(
             gp_env,
             policy_module,
             frames_per_batch=surrogate_frames_per_batch,
             total_frames=surrogate_total_frames,
-            split_trajs=False,
             device=device,
         )
 
@@ -277,6 +276,7 @@ def main():
         # designed to collect:
         for i, tensordict_data in enumerate(surrogate_collector):
             # we now have a batch of data to work with. Let's learn something from it.
+            num_epochs = 1
             for _ in range(num_epochs):
                 # We'll need an "advantage" signal to make PPO work.
                 # We re-compute it at each epoch as its value depends on the value
@@ -336,7 +336,6 @@ def main():
             # We're also using a learning rate scheduler. Like the gradient clipping,
             # this is a nice-to-have but nothing necessary for PPO to work.
             scheduler.step()
-        breakpoint()
         
         # Now sample from true environment with optimized policy
         true_env_collector = Collector(
@@ -345,7 +344,7 @@ def main():
             frames_per_batch=frames_per_batch,
             total_frames=total_frames,
         )
-        breakpoint()
+    breakpoint()
 
 if __name__ == '__main__':
     main()
