@@ -41,7 +41,7 @@ from torch_pilco.model_learning.dynamical_models import (
     ExactFit,
     RewardModel,
 )
-from torch_pilco.policy_learning.rollout import GPyTorchEnv
+from torch_pilco.policy_learning.gp_env import GPyTorchEnv
 
 def build_pendulum_training_data(
     data_tensordict: TensorDict,
